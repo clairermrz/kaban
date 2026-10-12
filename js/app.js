@@ -1854,6 +1854,7 @@ function viewDashboard(key){
 
     <div class="kpi3">
       ${kpiCard('This Month’s Income', 'leaf', 'save', calc.totalIncome, deltaInfo(calc.totalIncome, prev && prev.totalIncome, true), 'income')}
+      ${kpiCard('Total Expenses', 'receipt', 'extra', calc.necessities.actual + calc.extra.actual, deltaInfo(calc.necessities.actual + calc.extra.actual, prev && (prev.necActual + prev.extActual), false), 'necessities')}
       ${kpiCard('Debt Paid', 'credit-card', 'rose', calc.debtPaymentsThisMonth, deltaInfo(calc.debtPaymentsThisMonth, prev && prev.debtPaymentsThisMonth, false), 'debts')}
       ${kpiCard('Saved This Month', 'piggy-bank', 'sky', calc.savings.actualTotal, deltaInfo(calc.savings.actualTotal, prev && prev.savingsActualTotal, true), 'savings')}
     </div>
