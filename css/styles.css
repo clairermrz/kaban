@@ -1895,3 +1895,8 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}
 .hero-owed{align-self:flex-start;display:inline-flex;align-items:center;gap:6px;margin-top:2px;padding:4px 10px 4px 8px;border-radius:999px;border:1px solid color-mix(in srgb, var(--c-save) 40%, transparent);background:var(--c-save-tint);color:var(--c-save-ink);font-size:12.5px;font-weight:700;cursor:pointer;}
 .hero-owed:hover{filter:brightness(.97);}
 .hero-owed .ic:last-child{opacity:.7;}
+/* Reports: line the two big cards up (same top, same height) and let the chart fill its card */
+.dash-row-2{align-items:stretch;}
+.dash-row-2 > .card{margin:0;display:flex;flex-direction:column;}
+.annual-chart-box{position:relative;flex:1;min-height:300px;}
+.highlights > .card{margin:0;height:100%;}

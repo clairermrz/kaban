@@ -3362,7 +3362,7 @@ function reportOverview(A){
     <div class="dash-row-2">
       <div class="card">
         <div class="card-head"><h3 class="card-title">Income vs Expenses vs Savings</h3></div>
-        <div style="position:relative;height:300px;"><canvas id="annual12Chart"></canvas></div>
+        <div class="annual-chart-box"><canvas id="annual12Chart"></canvas></div>
       </div>
       <div class="card">
         <div class="card-head"><h3 class="card-title">Spending by Category</h3></div>
