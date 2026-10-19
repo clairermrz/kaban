@@ -485,7 +485,7 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ()=
 function applyChartTheme(){
   if(!window.Chart) return;
   const C = Chart.defaults;
-  C.font.family = "'Inter', system-ui, sans-serif";
+  C.font.family = "'Nunito', system-ui, sans-serif";
   C.font.size = 12;
   C.color = cssVar('--text-2');
   C.borderColor = cssVar('--border');
@@ -494,6 +494,15 @@ function applyChartTheme(){
   C.plugins.legend.labels.boxWidth = 8;
   C.plugins.legend.labels.boxHeight = 8;
   C.plugins.legend.labels.padding = 14;
+  // Breathing room between a chart's legend and the chart itself
+  if(!applyChartTheme.legendGap){
+    applyChartTheme.legendGap = true;
+    Chart.register({id:'legendGap', beforeInit(chart){
+      const lg = chart.legend; if(!lg || lg._gapPatched) return;
+      const fit = lg.fit; lg._gapPatched = true;
+      lg.fit = function(){ fit.call(this); this.height += 18; };
+    }});
+  }
   Object.assign(C.plugins.tooltip, {
     backgroundColor: cssVar('--inverse'), titleColor: cssVar('--on-inverse'), bodyColor: cssVar('--on-inverse'),
     padding: 10, cornerRadius: 10, displayColors: true, boxPadding: 4, usePointStyle: true,
