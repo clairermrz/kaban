@@ -1891,3 +1891,7 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}
   .dash-top .kpi-tile{flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;padding:16px !important;}
   .dash-top .kpi-tile-delta{white-space:normal;}
 }
+/* "₱X owed to you" link under the Available to Budget / Cash figures */
+.hero-owed{align-self:flex-start;display:inline-flex;align-items:center;gap:6px;margin-top:2px;padding:4px 10px 4px 8px;border-radius:999px;border:1px solid color-mix(in srgb, var(--c-save) 40%, transparent);background:var(--c-save-tint);color:var(--c-save-ink);font-size:12.5px;font-weight:700;cursor:pointer;}
+.hero-owed:hover{filter:brightness(.97);}
+.hero-owed .ic:last-child{opacity:.7;}

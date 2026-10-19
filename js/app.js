@@ -80,7 +80,7 @@ function defaultMonth(){
   };
 }
 function defaultState(){
-  return { settings: defaultSettings(), recurringBills: [], recurringIncome: [], months: {}, debts: [] };
+  return { settings: defaultSettings(), recurringBills: [], recurringIncome: [], months: {}, debts: [], loansGiven: [] };
 }
 
 /* Replaced with the signed-in user's data by bootApp() (called from cloud.js). */
@@ -175,6 +175,8 @@ function normalizeState(s){
     ['necessities','extra','playjar'].forEach(sec=> migrateSection(m[sec]));
   });
   if(!s.debts) s.debts = [];
+  if(!s.loansGiven) s.loansGiven = [];
+  s.loansGiven.forEach(l=>{ if(!l.payments) l.payments = []; if(!l.lateFee) l.lateFee = {mode:'none', amount:null, percent:null}; if(!l.source) l.source = {type:'cash'}; });
   s.debts.forEach(d=>{ if(!d.payments) d.payments = []; if(!d.lateFee) d.lateFee = {mode:'none', amount:null, percent:null}; });
   (s.settings.savingsGoals||[]).forEach(g=>{ if(g.active===undefined) g.active = true; });
   if(s.settings.savingsAmountDefault===undefined) s.settings.savingsAmountDefault = 0;
@@ -263,6 +265,7 @@ let cur = { year: today.getFullYear(), monthIndex: today.getMonth() };
 let curView = 'dashboard';
 let curYearForAnnual = today.getFullYear();
 let curDebtTab = 'overview';
+let curDebtSide = 'owe'; // 'owe' = debts you have, 'lent' = money others owe you
 let curDebtDetailId = null;
 let curDebtSearch = '';
 let curDebtTypeFilter = 'all';
@@ -863,13 +866,13 @@ function computeMonth(key){
   const hasAmountOverride = (m.savingsAmountOverride !== null && m.savingsAmountOverride !== undefined);
   const savingsAmount = hasAmountOverride ? Number(m.savingsAmountOverride) : Number(s.savingsAmountDefault)||0; // Monthly Savings Amount — what actually gets split across goals
 
-  const necBudget = necBudgetBase + necRolloverIn;
-  const extBudget = extBudgetBase + extRolloverIn;
-  const playBudget = playBudgetBase + playRolloverIn;
+  const necBudget = necBudgetBase + necRolloverIn + lentSectionBack(mStart, mEnd, 'necessities');
+  const extBudget = extBudgetBase + extRolloverIn + lentSectionBack(mStart, mEnd, 'extra');
+  const playBudget = playBudgetBase + playRolloverIn + lentSectionBack(mStart, mEnd, 'playjar');
 
-  const necActual = sumBy(m.necessities.expenses, e=>e.amount);
-  const extActual = sumBy(m.extra.expenses, e=>e.amount);
-  const playActual = sumBy(m.playjar.expenses, e=>e.amount);
+  const necActual = sumBy(m.necessities.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'necessities');
+  const extActual = sumBy(m.extra.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'extra');
+  const playActual = sumBy(m.playjar.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'playjar');
 
   const necRemaining = necBudget - necActual;
   const extRemaining = extBudget - extActual;
@@ -889,15 +892,15 @@ function computeMonth(key){
   const savingsGoalPctTotal = sumBy(goals.filter(g=>g.active), g=>g.allocation);
 
   const totalExpenses = necActual + extActual + playActual;
-  const netCashFlow = totalCashReceived - debtPaymentsThisMonth - totalExpenses - totalActualSavings;
+  const netCashFlow = totalCashReceived - debtPaymentsThisMonth - totalExpenses - totalActualSavings + lentCashAdjust(mStart, mEnd);
   const savingsRate = totalIncome>0 ? (totalActualSavings/totalIncome*100) : 0;
   const remainingBudgetOverall = necRemaining + extRemaining + playRemaining;
 
   return {
     key, totalIncome, incomeByPerson, borrowedFundsThisMonth, totalCashReceived, debtPaymentsThisMonth, budgetableIncome,
-    necessities:{budget:necBudget, budgetBase:necBudgetBase, actual:necActual, remaining:necRemaining, rolloverIn:necRolloverIn},
-    extra:{budget:extBudget, budgetBase:extBudgetBase, actual:extActual, remaining:extRemaining, rolloverIn:extRolloverIn},
-    playjar:{budget:playBudget, budgetBase:playBudgetBase, actual:playActual, remaining:playRemaining, rolloverIn:playRolloverIn},
+    necessities:{budget:necBudget, budgetBase:necBudgetBase, actual:necActual, remaining:necRemaining, rolloverIn:necRolloverIn, lentOut:lentSectionSpend(mStart, mEnd, 'necessities'), lentBack:lentSectionBack(mStart, mEnd, 'necessities')},
+    extra:{budget:extBudget, budgetBase:extBudgetBase, actual:extActual, remaining:extRemaining, rolloverIn:extRolloverIn, lentOut:lentSectionSpend(mStart, mEnd, 'extra'), lentBack:lentSectionBack(mStart, mEnd, 'extra')},
+    playjar:{budget:playBudget, budgetBase:playBudgetBase, actual:playActual, remaining:playRemaining, rolloverIn:playRolloverIn, lentOut:lentSectionSpend(mStart, mEnd, 'playjar'), lentBack:lentSectionBack(mStart, mEnd, 'playjar')},
     savings:{budgetTotal:savingsAmount, autoBudgetTotal:savAutoBase, isCustomTarget:hasAmountOverride, actualTotal:totalActualSavings,
       remaining:savingsAmount-totalActualSavings, totalPlanned:totalPlannedAllocation, unallocated:unallocatedAmount,
       goals, goalPctTotal:savingsGoalPctTotal},
@@ -918,15 +921,14 @@ function computeMonthShallow(key){
   const playBudgetBase = budgetableIncome * s.allocations.playjar/100;
   const pkey = prevMonthKey(cur_yearOf(key), cur_moOf(key));
   const pm = state.months[pkey];
-  let necIn=0, extIn=0, playIn=0;
+  let necIn=lentSectionBack(mStart, mEnd, 'necessities'), extIn=lentSectionBack(mStart, mEnd, 'extra'), playIn=lentSectionBack(mStart, mEnd, 'playjar');
   if(pm){
     const ppm = state.months[prevMonthKey(cur_yearOf(pkey), cur_moOf(pkey))];
     // don't chain further back than one level for shallow calc
-    necIn=0; extIn=0; playIn=0;
   }
-  const necActual = sumBy(m.necessities.expenses, e=>e.amount);
-  const extActual = sumBy(m.extra.expenses, e=>e.amount);
-  const playActual = sumBy(m.playjar.expenses, e=>e.amount);
+  const necActual = sumBy(m.necessities.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'necessities');
+  const extActual = sumBy(m.extra.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'extra');
+  const playActual = sumBy(m.playjar.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'playjar');
   return {
     necessities:{budget:necBudgetBase+necIn, actual:necActual, remaining:(necBudgetBase+necIn)-necActual},
     extra:{budget:extBudgetBase+extIn, actual:extActual, remaining:(extBudgetBase+extIn)-extActual},
@@ -1139,6 +1141,62 @@ function debtPaymentsInRange(fromISO, toISO_){
 }
 function borrowedFundsInRange(fromISO, toISO_){
   return sumBy(state.debts.filter(d=> d.dateBorrowed>=fromISO && d.dateBorrowed<=toISO_), d=>d.principal);
+}
+/* =========================================================
+   MONEY LENT — loans you gave to other people
+   Same shape as a debt, so the debt maths (balance, schedule, overdue) works on it unchanged.
+   Fields: lender = the person who owes you, borrower = who in the household lent it,
+   source = where the money came from: {type:'cash'} | {type:'goal', goalId} | {type:'section', section}.
+     cash:    lowers Available Cash when lent; repayments raise it again. Budgets untouched.
+     goal:    taken out of that savings goal; repayments refill the goal. Cash untouched.
+     section: counts as spending in that budget section that month; repayments are added back
+              to that section's budget (and to cash) in the month they arrive.
+========================================================= */
+function loansGiven(){ return state.loansGiven || (state.loansGiven = []); }
+function findLoan(id){
+  const d = state.debts.find(x=>x.id===id); if(d) return {loan:d, side:'owe'};
+  const l = loansGiven().find(x=>x.id===id); if(l) return {loan:l, side:'lent'};
+  return {loan:null, side:null};
+}
+function isLent(d){ return loansGiven().includes(d); }
+function lentSource(l){ return l.source || {type:'cash'}; }
+function lentSourceLabel(l){
+  const src = lentSource(l);
+  if(src.type==='goal'){ const g = state.settings.savingsGoals.find(x=>x.id===src.goalId); return g ? `Savings · ${g.name}` : 'Savings goal'; }
+  if(src.type==='section') return sectionLabel(src.section);
+  return 'Available cash';
+}
+function lentRepaidInRange(filterFn, fromISO, toISO_){
+  let t = 0;
+  loansGiven().filter(filterFn).forEach(l=> l.payments.forEach(p=>{ if(p.date>=fromISO && p.date<=toISO_) t += Number(p.amount||0); }));
+  return t;
+}
+/* Lent out of a budget section within a date range (counts as that section's spending). */
+function lentSectionSpend(fromISO, toISO_, sec){
+  return sumBy(loansGiven().filter(l=> lentSource(l).type==='section' && lentSource(l).section===sec && l.dateBorrowed>=fromISO && l.dateBorrowed<=toISO_), l=>l.principal);
+}
+/* Repayments for loans that came out of a budget section (added back to that section's budget). */
+function lentSectionBack(fromISO, toISO_, sec){
+  return lentRepaidInRange(l=> lentSource(l).type==='section' && lentSource(l).section===sec, fromISO, toISO_);
+}
+/* Change to Available Cash: cash-funded loans go out; repayments for cash- and section-funded loans come back in. */
+function lentCashAdjust(fromISO, toISO_){
+  const out = sumBy(loansGiven().filter(l=> lentSource(l).type==='cash' && l.dateBorrowed>=fromISO && l.dateBorrowed<=toISO_), l=>l.principal);
+  const back = lentRepaidInRange(l=> lentSource(l).type!=='goal', fromISO, toISO_);
+  return back - out;
+}
+/* Net effect on a savings goal's all-time total: money lent from it, minus repayments put back. */
+function lentGoalAdjust(goalId){
+  const ls = loansGiven().filter(l=> lentSource(l).type==='goal' && lentSource(l).goalId===goalId);
+  return sumBy(ls, l=>debtTotalPaid(l)) - sumBy(ls, l=>l.principal);
+}
+function lentTotals(){
+  let outstanding=0, received=0, overdue=0;
+  loansGiven().forEach(l=>{
+    outstanding += debtBalance(l); received += debtTotalPaid(l);
+    const i = debtOverdueInfo(l); if(i.overdue) overdue += (l.repaymentType==='installment' ? i.count : 1);
+  });
+  return {outstanding, received, overdue, active: loansGiven().filter(l=>debtBalance(l)>0).length};
 }
 function debtOverviewTotals(){
   const debts = state.debts;
@@ -1508,6 +1566,7 @@ function upcomingIcon(it){
   if(it.kind==='income') return {ic:'banknote', tone:'nec'};
   if(it.kind==='installment') return {ic:'credit-card', tone:'nec'};
   if(it.kind==='loan') return {ic:'landmark', tone:'play'};
+  if(it.kind==='repay') return {ic:'hand-coins', tone:'save'};
   const ic = categoryIcon(it.label + ' ' + (it.category||''));
   return {ic: ic==='tag' ? 'receipt' : ic, tone:'rose'};
 }
@@ -1849,6 +1908,7 @@ function viewDashboard(key){
             <div class="hero-note">after spending &amp; saving</div>
           </div>
         </div>
+        ${(()=>{ const o = lentTotals().outstanding; return o>0 ? `<button class="hero-owed" data-action="goto-lent">${icon('hand-coins','ic-sm')}${money(o)} owed to you${icon('chevron-right','ic-sm')}</button>` : ''; })()}
       </div>
     </section>
 
@@ -2013,12 +2073,12 @@ function categoryBars(ctx){
 function upcomingList(key){
   const items = computeUpcomingItems(key).filter(it=>it.date>=toISO(today)).slice(0,5);
   if(!items.length) return doodleNote('teacup', 'All quiet for now', 'Nothing due in the next 30 days. Add paydays in Settings or recurring bills from the Calendar.');
-  const kind = {payday:'Salary', income:'Recurring income', bill:'Bill', installment:'Installment', loan:'Loan payment'};
+  const kind = {payday:'Salary', income:'Recurring income', bill:'Bill', installment:'Installment', loan:'Loan payment', repay:'Owed to you'};
   return `<div class="up-list">${items.map(it=>{
     const d = new Date(it.date+'T00:00:00');
     const ui = upcomingIcon(it);
     const days = Math.round((d - new Date(toISO(today)+'T00:00:00'))/86400000);
-    const incoming = it.kind==='payday' || it.kind==='income';
+    const incoming = it.kind==='payday' || it.kind==='income' || it.kind==='repay';
     const when = days===0 ? 'Today' : days===1 ? (incoming?'Tomorrow':'Due tomorrow') : (incoming?`In ${days} days`:`Due in ${days} days`);
     return `<div class="up-row">
       <div class="date-tile"><small>${d.toLocaleDateString('en-US',{month:'short'})}</small><b>${String(d.getDate()).padStart(2,'0')}</b></div>
@@ -2116,6 +2176,7 @@ function searchEverything(q){
   });
   state.recurringBills.forEach(r=>{ if(r.name.toLowerCase().includes(q)) out.push({type:'Bill', icon:'repeat', tone:'rose', title:r.name, sub:`Recurring · ${frequencyLabel(r)}`, amount:-r.expectedAmount, go:{view:'calendar'}}); });
   state.settings.savingsGoals.forEach(g=>{ if(g.name.toLowerCase().includes(q)) out.push({type:'Goal', icon:goalIconFor(g), tone:'save', title:g.name, sub:'Savings goal', amount:null, go:{view:'savings'}}); });
+  loansGiven().forEach(l=>{ if(`${l.lender} ${l.borrower||''}`.toLowerCase().includes(q)) out.push({type:'Lent', icon:'hand-coins', tone:'save', title:l.lender, sub:`Owes you ${money(debtBalance(l))}`, amount:null, go:{view:'debts', debt:l.id}}); });
   state.debts.forEach(d=>{ if(`${d.lender} ${d.borrower||''}`.toLowerCase().includes(q)) out.push({type:'Debt', icon:'landmark', tone:'debt', title:d.lender, sub:`${DEBT_TYPE_LABEL[d.repaymentType]} · ${money(debtBalance(d))} left`, amount:null, go:{view:'debts', debt:d.id}}); });
   return out.slice(0, 8);
 }
@@ -2288,6 +2349,14 @@ function computeUpcomingItems(key){
   state.debts.filter(d=>d.repaymentType==='standard' && d.dueDate && debtBalance(d)>0).forEach(d=>{
     if(d.dueDate<=windowEnd) items.push({date:d.dueDate, kind:'loan', label:`${d.lender} loan due`, amount:debtBalance(d), status: d.dueDate<toISO(today)?'Overdue':'Expected'});
   });
+  // Repayments people owe you
+  loansGiven().filter(l=>l.repaymentType==='installment').forEach(l=>{
+    const next = debtInstallmentSchedule(l).find(x=>x.status==='Upcoming'||x.status==='Overdue'||x.status==='Partial');
+    if(next && next.dueDate<=windowEnd) items.push({date:next.dueDate, kind:'repay', label:`${l.lender} repayment #${next.index}`, amount:next.remaining, status: next.status==='Overdue'?'Overdue':'Expected'});
+  });
+  loansGiven().filter(l=>l.repaymentType==='standard' && l.dueDate && debtBalance(l)>0).forEach(l=>{
+    if(l.dueDate<=windowEnd) items.push({date:l.dueDate, kind:'repay', label:`${l.lender} repayment`, amount:debtBalance(l), status: l.dueDate<toISO(today)?'Overdue':'Expected'});
+  });
   items.sort((a,b)=>a.date.localeCompare(b.date));
   return items;
 }
@@ -2434,15 +2503,15 @@ function computeMonthShallowFull(key){
   const m = getMonth(key,true);
   const s = state.settings;
   const totalIncome = sumBy(m.income, i=>i.amount);
-  const necActual = sumBy(m.necessities.expenses, e=>e.amount);
-  const extActual = sumBy(m.extra.expenses, e=>e.amount);
-  const playActual = sumBy(m.playjar.expenses, e=>e.amount);
+  const necActual = sumBy(m.necessities.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'necessities');
+  const extActual = sumBy(m.extra.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'extra');
+  const playActual = sumBy(m.playjar.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'playjar');
   const totalExpenses = necActual+extActual+playActual;
   const savingsActualTotal = sumBy(Object.values(m.savingsActuals), v=>v);
   const [mStart, mEnd] = monthRange(key);
   const debtPaymentsThisMonth = debtPaymentsInRange(mStart, mEnd);
   const borrowedFundsThisMonth = borrowedFundsInRange(mStart, mEnd);
-  const netCashFlow = (totalIncome+borrowedFundsThisMonth) - totalExpenses - savingsActualTotal - debtPaymentsThisMonth;
+  const netCashFlow = (totalIncome+borrowedFundsThisMonth) - totalExpenses - savingsActualTotal - debtPaymentsThisMonth + lentCashAdjust(mStart, mEnd);
   const savingsRate = totalIncome>0 ? savingsActualTotal/totalIncome*100 : 0;
   return {totalIncome, totalExpenses, necActual, extActual, playActual, savingsActualTotal, netCashFlow, savingsRate, debtPaymentsThisMonth, borrowedFundsThisMonth,
     budgetableIncome: totalIncome-debtPaymentsThisMonth,
@@ -2520,7 +2589,7 @@ function iconTone(name, fallback){
 function catTone(sec, main, sub){ return iconTone(catIconFor(sec, main, sub), SECTION_TONE[sec] || 'nec'); }
 function goalIconFor(g){ return (g && g.icon) || goalIcon(g ? g.name : ''); }
 function totalSavedAllTime(goalId){
-  return sumBy(Object.values(state.months), m=> Number((m.savingsActuals||{})[goalId]||0));
+  return sumBy(Object.values(state.months), m=> Number((m.savingsActuals||{})[goalId]||0)) + lentGoalAdjust(goalId);
 }
 
 /* =========================================================
@@ -2628,7 +2697,7 @@ function viewSection(key, sec){
           <span class="br-amt"><b ${ratio>1.0001?'style="color:var(--danger-ink)"':''}>${money(calc.actual)}</b> <span>/ ${money(calc.budget)}</span></span>
         </div>
         ${barHtml(ratio, tone)}
-        <div class="sec-summary-meta">${pct(state.settings.allocations[sec]||0)} of budgetable income${calc.rolloverIn>0?` · includes ${money(calc.rolloverIn)} rolled over`:''}</div>
+        <div class="sec-summary-meta">${pct(state.settings.allocations[sec]||0)} of budgetable income${calc.rolloverIn>0?` · includes ${money(calc.rolloverIn)} rolled over`:''}${calc.lentOut>0?` · includes ${money(calc.lentOut)} lent out`:''}${calc.lentBack>0?` · ${money(calc.lentBack)} repaid back to this budget`:''}</div>
       </div>
       <div class="sec-summary-stats">
         <div><span>Remaining</span><b class="${calc.remaining>=0?'pos':'neg'}">${money(calc.remaining)}</b></div>
@@ -2796,13 +2865,18 @@ function debtStatusPill(d){
   if(s==='Flexible') return statusPill('flexible');
   return statusPill('ontrack');
 }
+function debtSideTabs(){
+  const tabs = [{id:'owe', label:'I owe', ic:'landmark', tone:'debt'}, {id:'lent', label:'Owed to me', ic:'hand-coins', tone:'save'}];
+  return `<div class="section-tabs" role="tablist">${tabs.map(t=>`<button role="tab" aria-selected="${curDebtSide===t.id}" class="${curDebtSide===t.id?'active':''}" data-action="set-debt-side" data-side="${t.id}"><span class="badge-ic t-${t.tone}">${icon(t.ic)}</span>${t.label}</button>`).join('')}</div>`;
+}
 function viewDebts(key){
   if(curDebtTab==='all') curDebtTab = 'overview';
   if(curDebtDetailId){
-    const d = state.debts.find(x=>x.id===curDebtDetailId);
-    if(d) return debtDetailView(d);
+    const f = findLoan(curDebtDetailId);
+    if(f.loan){ curDebtSide = f.side; return debtDetailView(f.loan); }
     curDebtDetailId = null;
   }
+  if(curDebtSide==='lent') return viewLent(key);
   const t = debtOverviewTotals();
   const [mStart, mEnd] = monthRange(key);
   const paidThisMonth = debtPaymentsInRange(mStart, mEnd);
@@ -2814,6 +2888,7 @@ function viewDebts(key){
   else body = debtHistoryTab();
   return `
     ${pageHead('Debt / Loans Tracker', 'Everything you owe, in one place', `<button class="btn btn-primary" data-action="add-debt">${icon('plus','ic-sm')}Add Loan / Debt</button>`)}
+    ${debtSideTabs()}
     <div class="kpi-row">
       ${kpiCard('Total Balance', 'target', 'rose', t.totalOutstanding, null)}
       ${kpiCard('Total Paid (All Time)', 'wallet', 'nec', t.totalPaid, null)}
@@ -2822,6 +2897,58 @@ function viewDebts(key){
     </div>
     ${pillTabs('debt', DEBT_TABS, curDebtTab)}
     ${body}
+  `;
+}
+function viewLent(key){
+  const t = lentTotals();
+  const [mStart, mEnd] = monthRange(key);
+  const receivedThisMonth = lentRepaidInRange(()=>true, mStart, mEnd);
+  const list = loansGiven().slice().sort((a,b)=> debtBalance(b)-debtBalance(a));
+  const rows = [];
+  loansGiven().forEach(l=> l.payments.forEach(p=> rows.push({...p, name:l.lender, loanId:l.id, type:l.repaymentType})));
+  rows.sort((a,b)=> b.date.localeCompare(a.date));
+  return `
+    ${pageHead('Debt / Loans Tracker', 'Money other people owe you', `<button class="btn btn-primary" data-action="add-lent">${icon('plus','ic-sm')}Lend Money</button>`)}
+    ${debtSideTabs()}
+    <div class="kpi-row">
+      ${kpiCard('Owed to You', 'hand-coins', 'save', t.outstanding, null)}
+      ${kpiCard('Received (All Time)', 'wallet', 'nec', t.received, null)}
+      ${kpiCard(`Received in ${MONTH_NAMES[cur.monthIndex]}`, 'calendar-check', 'sky', receivedThisMonth, null)}
+      ${t.overdue ? kpiCard('Overdue Repayments', 'circle-alert', 'rose', null, null, null, `${t.overdue}`) : ''}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3 class="card-title">Money Lent</h3><span class="card-chip">${t.active} still owing</span></div>
+      ${list.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th style="width:30px;"></th><th>Borrowed by</th><th>Type</th><th>Came from</th><th>Lent by</th><th class="num">Lent</th><th class="num">Total Due</th><th class="num">Received</th><th class="num">Still Owed</th><th>Status</th><th style="width:40px;"></th></tr></thead>
+        <tbody>${list.map(l=>`<tr class="clickable" data-action="view-debt" data-id="${l.id}">
+          <td style="color:var(--text-3);">${icon('chevron-right','ic-sm')}</td>
+          <td><span class="cat-name"><span class="badge-ic xs t-save">${icon(DEBT_TYPE_ICON[l.repaymentType]||'hand-coins')}</span><b>${escapeHtml(l.lender)}</b></span></td>
+          <td class="muted-cell nowrap">${DEBT_TYPE_LABEL[l.repaymentType]}</td>
+          <td class="muted-cell nowrap">${escapeHtml(lentSourceLabel(l))}</td>
+          <td>${personChip(l.borrower)}</td>
+          <td class="num">${money(l.principal)}</td>
+          <td class="num">${money(debtTotalOwed(l))}</td>
+          <td class="num">${money(debtTotalPaid(l))}</td>
+          <td class="num"><b>${money(debtBalance(l))}</b></td>
+          <td>${debtStatusPill(l)}</td>
+          <td>${kebab('debt',{id:l.id})}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : emptyNote('hand-coins','save', 'Nothing lent yet. When you lend money to someone, record it here to keep track of what they still owe you.')}
+    </div>
+    <div class="card" style="margin-top:18px;">
+      <div class="card-head"><h3 class="card-title">Repayments Received</h3><span class="card-chip">${rows.length}</span></div>
+      ${rows.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Date</th><th>From</th><th class="num">Amount</th><th>Note</th><th style="width:40px;"></th></tr></thead>
+        <tbody>${rows.map(r=>`<tr>
+          <td class="nowrap">${fmtDateLong(r.date)}</td>
+          <td><span class="cat-name"><span class="badge-ic xs t-save">${icon(DEBT_TYPE_ICON[r.type]||'hand-coins')}</span>${escapeHtml(r.name)}</span></td>
+          <td class="num"><b>${money(r.amount)}</b></td>
+          <td class="muted-cell">${escapeHtml(r.note||'')}</td>
+          <td>${kebab('payment',{id:r.id, debtid:r.loanId})}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : emptyNote('wallet','save','No repayments yet.')}
+    </div>
+    <p class="help-text" style="margin-top:12px;">Where the money came from decides what it affects: <b>Available cash</b> lowers your Available Cash until it’s repaid; a <b>savings goal</b> is reduced and refilled by repayments; a <b>budget section</b> counts as spending there that month, and repayments are added back to that section’s budget.</p>
   `;
 }
 function debtAllTab(){
@@ -2963,6 +3090,7 @@ function debtHistoryTab(){
   </div>`;
 }
 function debtDetailView(d){
+  const lent = isLent(d);
   const ia = debtInterestAmount(d);
   const total = debtTotalOwed(d), paid = debtTotalPaid(d), balance = debtBalance(d);
   const p = debtProgressPct(d)/100;
@@ -2970,15 +3098,15 @@ function debtDetailView(d){
   const payments = [...d.payments].sort((a,b)=>b.date.localeCompare(a.date));
   const lf = debtLateFeeAmount(d);
   return `
-    <button class="btn btn-ghost btn-sm" data-action="back-to-debts" style="margin-top:8px;">${icon('arrow-left','ic-sm')}Back to Debts</button>
-    ${pageHead(escapeHtml(d.lender), `${escapeHtml(d.borrower||'')} · ${DEBT_TYPE_LABEL[d.repaymentType]}`,
+    <button class="btn btn-ghost btn-sm" data-action="back-to-debts" style="margin-top:8px;">${icon('arrow-left','ic-sm')}${lent?'Back to Money Lent':'Back to Debts'}</button>
+    ${pageHead(escapeHtml(d.lender), lent ? `Owes you · lent by ${escapeHtml(d.borrower||'')} · from ${escapeHtml(lentSourceLabel(d))} · ${DEBT_TYPE_LABEL[d.repaymentType]}` : `${escapeHtml(d.borrower||'')} · ${DEBT_TYPE_LABEL[d.repaymentType]}`,
       `<button class="btn" data-action="edit-debt" data-id="${d.id}">${icon('pencil','ic-sm')}Edit</button>
-       <button class="btn btn-primary" data-action="record-debt-payment" data-id="${d.id}">${icon('plus','ic-sm')}Record Payment</button>`)}
+       <button class="btn btn-primary" data-action="record-debt-payment" data-id="${d.id}">${icon('plus','ic-sm')}${lent?'Record Repayment':'Record Payment'}</button>`)}
     ${overdue.overdue ? `<div class="banner gold"><div class="banner-text" style="display:flex;gap:12px;align-items:center;"><span class="badge-ic sm t-rose">${icon('circle-alert')}</span><span><strong>${money(overdue.amount)} overdue</strong>${overdue.monthsOverdue?` · ${overdue.monthsOverdue} month${overdue.monthsOverdue===1?'':'s'}`:''}</span></div></div>` : ''}
     <div class="kpi-row">
-      ${kpiCard('Total Owed', 'landmark', 'debt', total, null)}
-      ${kpiCard('Paid So Far', 'wallet', 'nec', paid, null)}
-      ${kpiCard('Balance', 'target', 'rose', balance, null)}
+      ${kpiCard(lent?'Total Due to You':'Total Owed', lent?'hand-coins':'landmark', lent?'save':'debt', total, null)}
+      ${kpiCard(lent?'Received So Far':'Paid So Far', 'wallet', 'nec', paid, null)}
+      ${kpiCard(lent?'Still Owed to You':'Balance', 'target', lent?'sky':'rose', balance, null)}
     </div>
     <div class="page-2col">
       <div class="card">
@@ -2987,7 +3115,8 @@ function debtDetailView(d){
         ${barHtml(p,'nec')}
         <div class="divider"></div>
         <div class="kv-list">
-          <div><span>Date borrowed</span><b>${fmtDateLong(d.dateBorrowed)}</b></div>
+          <div><span>${lent?'Date lent':'Date borrowed'}</span><b>${fmtDateLong(d.dateBorrowed)}</b></div>
+          ${lent ? `<div><span>Came from</span><b>${escapeHtml(lentSourceLabel(d))}</b></div>` : ''}
           <div><span>Due date</span><b>${d.repaymentType==='flexible'?'None (flexible)':(d.dueDate?fmtDateLong(d.dueDate):'—')}</b></div>
           <div><span>Principal</span><b>${money(d.principal)}</b></div>
           <div><span>Interest</span><b>${d.repaymentType==='installment' ? (d.installment.interestKnown?money(d.installment.interestAmount):'Unknown') : escapeHtml(ia.label)}</b></div>
@@ -2995,7 +3124,7 @@ function debtDetailView(d){
         </div>
       </div>
       <div class="card">
-        <div class="card-head"><h3 class="card-title">Payment History</h3><span class="card-chip">${payments.length}</span></div>
+        <div class="card-head"><h3 class="card-title">${lent?'Repayments':'Payment History'}</h3><span class="card-chip">${payments.length}</span></div>
         ${payments.length ? `<div class="tbl-wrap"><table class="tbl">
           <thead><tr><th>Date</th><th class="num">Amount</th><th>Note</th><th style="width:40px;"></th></tr></thead>
           <tbody>${payments.map(p2=>`<tr><td class="nowrap">${fmtDateLong(p2.date)}</td><td class="num"><b>${money(p2.amount)}</b></td><td class="muted-cell">${escapeHtml(p2.note||'')}</td><td>${kebab('payment',{id:p2.id, debtid:d.id})}</td></tr>`).join('')}</tbody>
@@ -3061,6 +3190,13 @@ function viewCalendar(key){
       tags += tag('save', catIconFor(e.section, e.mainCategory, e.subCategory), expenseLeafLabel(e), `${expenseLeafLabel(e)} · ${money(e.amount)}`);
     });
     if(curCalFilters.debts){
+      loansGiven().forEach(l=>{
+        if(l.repaymentType==='installment'){
+          debtInstallmentSchedule(l).forEach(x=>{ if(x.dueDate===iso) tags += tag(x.status==='Paid'?'muted':'nec', x.status==='Paid'?'check':'hand-coins', `${l.lender} #${x.index}`, `${l.lender} owes you · #${x.index} · ${money(x.expected)} · ${x.status}`); });
+        } else if(l.repaymentType==='standard' && l.dueDate===iso){
+          tags += tag(debtBalance(l)<=0?'muted':'nec', 'hand-coins', `${l.lender} repays`, `${l.lender} owes you ${money(debtBalance(l))}`);
+        }
+      });
       state.debts.forEach(deb=>{
         if(deb.repaymentType==='installment'){
           debtInstallmentSchedule(deb).forEach(s=>{
@@ -3614,10 +3750,14 @@ function handleAction(action, el, key){
 
   if(action==='decide-rollover') return openRolloverModal(el.dataset.monthkey, el.dataset.section);
 
-  if(action==='add-debt') return openDebtModal(null);
+  if(action==='goto-lent'){ curDebtSide = 'lent'; navTo('debts'); return; }
+  if(action==='set-debt-side'){ curDebtSide = el.dataset.side; curDebtDetailId = null; renderAll(); return; }
+  if(action==='add-debt') return openDebtModal(null, 'owe');
+  if(action==='add-lent') return openDebtModal(null, 'lent');
   if(action==='edit-debt') return openDebtModal(el.dataset.id);
-  if(action==='delete-debt') return confirmModal('Delete this debt and its entire payment history?', ()=>{
+  if(action==='delete-debt') return confirmModal(findLoan(el.dataset.id).side==='lent' ? 'Delete this loan and all repayments recorded for it?' : 'Delete this debt and its entire payment history?', ()=>{
     state.debts = state.debts.filter(d=>d.id!==el.dataset.id);
+    state.loansGiven = loansGiven().filter(d=>d.id!==el.dataset.id);
     if(curDebtDetailId===el.dataset.id) curDebtDetailId = null;
     saveState(); renderAll();
   });
@@ -3626,7 +3766,7 @@ function handleAction(action, el, key){
   if(action==='record-debt-payment') return openDebtPaymentModal(el.dataset.id, null);
   if(action==='edit-debt-payment') return openDebtPaymentModal(el.dataset.debtid, el.dataset.id);
   if(action==='delete-debt-payment'){
-    const d = state.debts.find(x=>x.id===el.dataset.debtid); if(!d) return;
+    const d = findLoan(el.dataset.debtid).loan; if(!d) return;
     const idx = d.payments.findIndex(p=>p.id===el.dataset.id); if(idx<0) return;
     const item = d.payments[idx];
     return deleteWithUndo('Payment deleted', ()=>d.payments.splice(idx,1), ()=>d.payments.splice(idx,0,item));
@@ -3750,7 +3890,7 @@ function rowMenuItems(ds, key){
     case 'payment': return [edit('edit-debt-payment'), del('delete-debt-payment')];
     case 'earner': return [edit('edit-earner'), {label:'Remove', icon:'trash-2', tone:'danger', onClick:run('delete-earner')}];
     case 'debt': return [
-      {label:'Record payment', icon:'hand-coins', tone:'c-nec', onClick:run('record-debt-payment')},
+      {label: findLoan(ds.id).side==='lent' ? 'Record repayment' : 'Record payment', icon:'hand-coins', tone:'c-nec', onClick:run('record-debt-payment')},
       {label:'View details', icon:'eye', onClick:run('view-debt')},
       edit('edit-debt'), del('delete-debt')];
     case 'goal': {
@@ -4875,8 +5015,13 @@ function openRolloverModal(monthKeyRef, sec){
 
 /* ---------- Modal: Recurring bills ---------- */
 /* ---------- Modal: Add/Edit debt ---------- */
-function openDebtModal(id){
-  const existing = id ? state.debts.find(d=>d.id===id) : null;
+function openDebtModal(id, side){
+  const found = id ? findLoan(id) : {loan:null, side:null};
+  const existing = found.loan;
+  const lent = (found.side || side) === 'lent';
+  const src = existing && lent ? lentSource(existing) : {type:'cash'};
+  const srcValue = src.type==='goal' ? `goal:${src.goalId}` : src.type==='section' ? `section:${src.section}` : 'cash';
+  const goalsForSource = state.settings.savingsGoals.filter(g=>g.active || (src.type==='goal' && src.goalId===g.id));
   const borrowers = debtBorrowerList();
   const type = existing ? existing.repaymentType : 'standard';
   const it = existing ? existing.interest : {mode:'none'};
@@ -4884,9 +5029,19 @@ function openDebtModal(id){
   const lf = existing ? existing.lateFee : {mode:'none'};
   const body = `
     <div class="field-row">
-      <div class="field"><label>Lender</label><input type="text" id="f-lender" value="${existing?escapeHtml(existing.lender):''}" placeholder="e.g. BPI, Jane, Mom"></div>
-      <div class="field"><label>Borrower</label><input type="text" id="f-borrower" list="borrowerList" value="${existing?escapeHtml(existing.borrower):escapeHtml((earners()[0]||{}).name||'')}"><datalist id="borrowerList">${borrowers.map(b=>`<option value="${escapeHtml(b)}">`).join('')}</datalist></div>
+      <div class="field"><label>${lent?'Borrowed by (who owes you)':'Lender'}</label><input type="text" id="f-lender" value="${existing?escapeHtml(existing.lender):''}" placeholder="${lent?'e.g. Jane, Tito Ben':'e.g. BPI, Jane, Mom'}"></div>
+      <div class="field"><label>${lent?'Lent by':'Borrower'}</label><input type="text" id="f-borrower" list="borrowerList" value="${existing?escapeHtml(existing.borrower):escapeHtml((earners()[0]||{}).name||'')}"><datalist id="borrowerList">${borrowers.map(b=>`<option value="${escapeHtml(b)}">`).join('')}</datalist></div>
     </div>
+    ${lent ? `<div class="field"><label>Money came from</label>
+      <select id="f-source">
+        <option value="cash" ${srcValue==='cash'?'selected':''}>Available cash — lowers Available Cash until repaid</option>
+        ${goalsForSource.length ? `<optgroup label="A savings goal — repayments refill it">${goalsForSource.map(g=>`<option value="goal:${g.id}" ${srcValue==='goal:'+g.id?'selected':''}>${escapeHtml(g.name)}</option>`).join('')}</optgroup>` : ''}
+        <optgroup label="A budget section — counts as spending this month">
+          ${EXPENSE_SECTIONS.map(x=>`<option value="section:${x}" ${srcValue==='section:'+x?'selected':''}>${sectionLabel(x)}</option>`).join('')}
+        </optgroup>
+      </select>
+      <div class="help-text" id="f-source-help"></div>
+    </div>` : ''}
     <div class="field"><label>Repayment type</label>
       <select id="f-type">
         <option value="standard" ${type==='standard'?'selected':''}>Standard Loan</option>
@@ -4896,7 +5051,7 @@ function openDebtModal(id){
     </div>
     <div class="field-row">
       <div class="field"><label>Principal / original amount (${currencySymbol()})</label><input type="number" id="f-principal" min="0" step="0.01" value="${existing?existing.principal:''}"></div>
-      <div class="field"><label>Date borrowed</label><input type="date" id="f-dateBorrowed" value="${existing?existing.dateBorrowed:toISO(today)}"></div>
+      <div class="field"><label>${lent?'Date lent':'Date borrowed'}</label><input type="date" id="f-dateBorrowed" value="${existing?existing.dateBorrowed:toISO(today)}"></div>
     </div>
 
     <div id="grp-standard">
@@ -4953,14 +5108,18 @@ function openDebtModal(id){
 
     <div id="grp-flexible" class="help-text">Flexible loans track principal paid down over time with no due date — they're never marked overdue.</div>
   `;
-  openModal(existing?'Edit debt':'Add debt', body, ()=>{
+  openModal(lent ? (existing?'Edit money lent':'Lend money') : (existing?'Edit debt':'Add debt'), body, ()=>{
     const lender = document.getElementById('f-lender').value.trim();
-    const borrower = document.getElementById('f-borrower').value.trim() || 'Clai';
+    const borrower = document.getElementById('f-borrower').value.trim() || ((earners()[0]||{}).name || 'Me');
     const repaymentType = document.getElementById('f-type').value;
     const principal = Number(document.getElementById('f-principal').value)||0;
     const dateBorrowed = document.getElementById('f-dateBorrowed').value;
-    if(!lender || !dateBorrowed || principal<=0){ showFormError('Enter a lender, date borrowed, and a principal amount.'); return false; }
-    const debt = existing || {id:uid('debt'), payments:[]};
+    if(!lender || !dateBorrowed || principal<=0){ showFormError(lent ? 'Enter who borrowed it, the date lent, and the amount.' : 'Enter a lender, date borrowed, and a principal amount.'); return false; }
+    const debt = existing || {id:uid(lent?'lent':'debt'), payments:[]};
+    if(lent){
+      const v = document.getElementById('f-source').value;
+      debt.source = v.startsWith('goal:') ? {type:'goal', goalId:v.slice(5)} : v.startsWith('section:') ? {type:'section', section:v.slice(8)} : {type:'cash'};
+    }
     debt.lender = lender; debt.borrower = borrower; debt.repaymentType = repaymentType;
     debt.principal = principal; debt.dateBorrowed = dateBorrowed;
     if(repaymentType==='standard'){
@@ -4998,9 +5157,18 @@ function openDebtModal(id){
       debt.lateFee = {mode:'none'};
       debt.installment = null;
     }
-    if(!existing) state.debts.push(debt);
+    if(!existing) (lent ? loansGiven() : state.debts).push(debt);
+    if(lent) curDebtSide = 'lent';
     saveState(); renderAll(); return true;
   }, {submitLabel:'Save'});
+  if(lent){
+    const help = {cash:'Your budgets stay the same. Available Cash goes down now and back up as they repay you.',
+      goal:'Taken out of this goal’s saved total. Each repayment goes back into the goal.',
+      section:'Counts as spending in this section in the month you lend it. Repayments are added back to this section’s budget in the month you receive them.'};
+    const srcSel = document.getElementById('f-source');
+    const showHelp = ()=>{ document.getElementById('f-source-help').textContent = help[srcSel.value.split(':')[0]]; };
+    srcSel.addEventListener('change', showHelp); showHelp();
+  }
 
   function applyTypeVisibility(){
     const type = document.getElementById('f-type').value;
@@ -5031,16 +5199,17 @@ function openDebtModal(id){
 
 /* ---------- Modal: Record/edit a debt payment ---------- */
 function openDebtPaymentModal(debtId, paymentId){
-  const d = state.debts.find(x=>x.id===debtId);
+  const d = findLoan(debtId).loan;
   if(!d) return;
+  const lent = isLent(d);
   const existing = paymentId ? d.payments.find(p=>p.id===paymentId) : null;
   const body = `
-    <p class="small-muted">Recording a payment for ${escapeHtml(d.lender)} (${escapeHtml(d.borrower)}). Balance: <strong style="color:var(--ink);">${money(debtBalance(d))}</strong></p>
-    <div class="field"><label>Payment date</label><input type="date" id="f-date" value="${existing?existing.date:toISO(today)}"></div>
-    <div class="field"><label>Amount paid (${currencySymbol()})</label><input type="number" id="f-amount" min="0" step="0.01" value="${existing?existing.amount:''}"></div>
+    <p class="small-muted">${lent ? `Recording money ${escapeHtml(d.lender)} paid back to you. Still owed: <strong style="color:var(--ink);">${money(debtBalance(d))}</strong>` : `Recording a payment for ${escapeHtml(d.lender)} (${escapeHtml(d.borrower)}). Balance: <strong style="color:var(--ink);">${money(debtBalance(d))}</strong>`}</p>
+    <div class="field"><label>${lent?'Date received':'Payment date'}</label><input type="date" id="f-date" value="${existing?existing.date:toISO(today)}"></div>
+    <div class="field"><label>${lent?'Amount received':'Amount paid'} (${currencySymbol()})</label><input type="number" id="f-amount" min="0" step="0.01" value="${existing?existing.amount:''}"></div>
     <div class="field"><label>Note (optional)</label><input type="text" id="f-note" value="${existing?escapeHtml(existing.note||''):''}" placeholder="e.g. Extra payment"></div>
   `;
-  openModal(existing?'Edit payment':'Record payment', body, ()=>{
+  openModal(lent ? (existing?'Edit repayment':'Record repayment') : (existing?'Edit payment':'Record payment'), body, ()=>{
     const date = document.getElementById('f-date').value;
     const amount = Number(document.getElementById('f-amount').value);
     const note = document.getElementById('f-note').value;
