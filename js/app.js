@@ -5033,9 +5033,9 @@ function openDebtModal(id, side){
   const goalsForSource = state.settings.savingsGoals.filter(g=>g.active || (src.type==='goal' && src.goalId===g.id));
   const borrowers = debtBorrowerList();
   const type = existing ? existing.repaymentType : 'standard';
-  const it = existing ? existing.interest : {mode:'none'};
-  const inst = existing ? existing.installment : {};
-  const lf = existing ? existing.lateFee : {mode:'none'};
+  const it = (existing && existing.interest) || {mode:'none'};
+  const inst = (existing && existing.installment) || {}; // standard & flexible loans have no installment plan
+  const lf = (existing && existing.lateFee) || {mode:'none'};
   const body = `
     <div class="field-row">
       <div class="field"><label>${lent?'Borrowed by (who owes you)':'Lender'}</label><input type="text" id="f-lender" value="${existing?escapeHtml(existing.lender):''}" placeholder="${lent?'e.g. Jane, Tito Ben':'e.g. BPI, Jane, Mom'}"></div>
