@@ -4,19 +4,18 @@
 const NAV_ITEMS = [
   {id:'dashboard', label:'Dashboard', icon:'house'},
   {id:'income', label:'Income', icon:'receipt'},
-  {id:'expenses', label:'Expenses', icon:'shopping-bag', match:['necessities','extra','playjar']},
+  {id:'expenses', label:'Expenses', icon:'shopping-bag', get match(){ return allBuckets().map(b=>b.id); }},
   {id:'savings', label:'Savings', icon:'piggy-bank'},
   {id:'debts', label:'Debts', icon:'credit-card'},
   {id:'calendar', label:'Calendar', icon:'calendar-days'},
   {id:'annual', label:'Reports', icon:'chart-column'},
   {id:'settings', label:'Settings', icon:'settings'}
 ];
-const EXPENSE_SECTIONS = ['necessities','extra','playjar'];
 let curExpenseSection = 'necessities';
 /* Phone bottom bar: four destinations plus the centre Add button; everything else lives under More. */
 const BOTTOM_NAV = [
   {id:'dashboard', label:'Home', icon:'house'},
-  {id:'expenses', label:'Expenses', icon:'shopping-bag', match:['necessities','extra','playjar']},
+  {id:'expenses', label:'Expenses', icon:'shopping-bag', get match(){ return allBuckets().map(b=>b.id); }},
   {id:'__add'},
   {id:'calendar', label:'Calendar', icon:'calendar-days'},
   {id:'__more', label:'More', icon:'ellipsis', match:['income','savings','debts','annual','settings']}
@@ -59,6 +58,54 @@ function defaultSettings(){
     ]
   };
 }
+/* =========================================================
+   BUDGET BUCKETS & PLANS
+   Buckets are the spending sections (each has its own categories and expenses).
+   Savings is always there (goals live in it). Debt only becomes a bucket when
+   "Deduct debt payments before budgeting" is off; its spending is the debt payments recorded.
+   A plan says how a month's money is split: method 'percent' (shares that total 100%) or
+   'zero' (peso amounts, zero-based). Plans apply from a month onward, so changing the plan
+   never rewrites earlier months.
+========================================================= */
+const BUCKET_TONES = ['nec','extra','play','save','debt','plum','teal','sand'];
+function defaultBuckets(){
+  return [
+    {id:'necessities', name:'Necessities', icon:'house', tone:'nec', inTotal:true, flexible:false, removedFrom:null},
+    {id:'extra', name:'Extra Expenses', icon:'shopping-cart', tone:'extra', inTotal:true, flexible:true, removedFrom:null},
+    {id:'playjar', name:'Play Jar', icon:'heart', tone:'play', inTotal:false, flexible:true, removedFrom:null}
+  ];
+}
+const SPECIAL_BUCKETS = {
+  savings:{id:'savings', name:'Savings', icon:'sprout', tone:'save'},
+  debt:{id:'debt', name:'Debt Payments', icon:'credit-card', tone:'debt'}
+};
+function allBuckets(){ return state.settings.buckets || (state.settings.buckets = defaultBuckets()); }
+function bucketById(id){ return allBuckets().find(b=>b.id===id) || SPECIAL_BUCKETS[id] || null; }
+function isExpenseSection(id){ return allBuckets().some(b=>b.id===id); }
+function bucketHasSpend(key, id){ const m = state.months[key]; return !!(m && m[id] && m[id].expenses && m[id].expenses.length); }
+/* A removed bucket disappears from new months, but still shows in any month that has expenses in it. */
+function bucketActiveIn(b, key){ return !b.removedFrom || key < b.removedFrom || bucketHasSpend(key, b.id); }
+function expenseSections(key){ key = key || monthKey(cur.year, cur.monthIndex); return allBuckets().filter(b=>bucketActiveIn(b, key)).map(b=>b.id); }
+function ensureBucketSections(m){ allBuckets().forEach(b=>{ if(!m[b.id]) m[b.id] = {expenses:[], budgetOverrides:{}}; }); if(!m.rollover) m.rollover = {}; return m; }
+function legacyPlan(){ return {from:'0000-01', method:'percent', debtFirst:true, alloc:Object.assign({}, state.settings.allocations||{})}; }
+function budgetPlans(){
+  const st = state.settings;
+  if(!Array.isArray(st.budgetPlans) || !st.budgetPlans.length) st.budgetPlans = [legacyPlan()];
+  return st.budgetPlans;
+}
+function planFor(key){
+  let p = null;
+  budgetPlans().forEach(x=>{ if(x.from <= key && (!p || x.from >= p.from)) p = x; });
+  return p || budgetPlans().slice().sort((a,b)=>a.from.localeCompare(b.from))[0];
+}
+/* What a plan gives one bucket for a month (before rollovers): a share of the income base, or a fixed amount. */
+function planAmount(plan, id, base){ const v = Number((plan.alloc||{})[id])||0; return plan.method==='zero' ? v : base*v/100; }
+function planBucketIds(plan, key){ return expenseSections(key).concat(['savings']).concat(plan.debtFirst ? [] : ['debt']); }
+function incomeBase(plan, totalIncome, debtPayments){ return plan.debtFirst ? totalIncome - debtPayments : totalIncome; }
+function incomeBaseLabel(plan){ return plan.debtFirst ? 'income after debt payments' : 'total income'; }
+/* "45%" or "₱12,000" — how a bucket's share reads in the current plan. */
+function planShareLabel(plan, id){ const v = Number((plan.alloc||{})[id])||0; return plan.method==='zero' ? money(v) : pct(v); }
+
 function leafCatTree(names){ return names.map(name=>({id:uid('cat'), name, subs:[], inactiveFrom:null})); }
 function getCategoryTree(section){ return state.settings.categoryTree[section]; }
 /* A category (main or sub) is active for a given month if it was never deactivated,
@@ -151,8 +198,12 @@ function migrateRecurring(b){
   };
 }
 function normalizeState(s){
+  if(!Array.isArray(s.settings.buckets) || !s.settings.buckets.length) s.settings.buckets = defaultBuckets();
+  if(!Array.isArray(s.settings.budgetPlans) || !s.settings.budgetPlans.length)
+    s.settings.budgetPlans = [{from:'0000-01', method:'percent', debtFirst:true, alloc:Object.assign({}, s.settings.allocations||defaultSettings().allocations)}];
+  const bucketIds = s.settings.buckets.map(b=>b.id);
   if(!s.settings.categoryDefaults) s.settings.categoryDefaults = {necessities:{}, extra:{}, playjar:{}};
-  ['necessities','extra','playjar'].forEach(sec=>{
+  bucketIds.forEach(sec=>{
     s.settings.categoryDefaults[sec] = migrateDefaultsMap(s.settings.categoryDefaults[sec]||{});
   });
   if(!s.settings.categoryTree){
@@ -164,7 +215,8 @@ function normalizeState(s){
       playjar: merged.playjar || fallback.playjar
     };
   }
-  ['necessities','extra','playjar'].forEach(sec=>{
+  bucketIds.forEach(sec=>{
+    if(!s.settings.categoryTree[sec]) s.settings.categoryTree[sec] = leafCatTree(['Miscellaneous']);
     s.settings.categoryTree[sec].forEach(main=>{
       if(main.inactiveFrom===undefined) main.inactiveFrom = null;
       (main.subs||[]).forEach(sub=>{ if(sub.inactiveFrom===undefined) sub.inactiveFrom = null; });
@@ -172,7 +224,8 @@ function normalizeState(s){
   });
   if(!s.settings.dashboardPrefs) s.settings.dashboardPrefs = defaultSettings().dashboardPrefs;
   Object.values(s.months||{}).forEach(m=>{
-    ['necessities','extra','playjar'].forEach(sec=> migrateSection(m[sec]));
+    bucketIds.forEach(sec=>{ if(!m[sec]) m[sec] = {expenses:[], budgetOverrides:{}}; migrateSection(m[sec]); });
+    if(!m.rollover) m.rollover = {};
   });
   if(!s.debts) s.debts = [];
   if(!s.loansGiven) s.loansGiven = [];
@@ -252,10 +305,10 @@ function monthKey(y,mi){ return `${y}-${String(mi+1).padStart(2,'0')}`; }
 function prevMonthKey(y,mi){ return mi===0 ? monthKey(y-1,11) : monthKey(y,mi-1); }
 function ensureMonth(key){
   if(!state.months[key]) state.months[key] = defaultMonth();
-  return state.months[key];
+  return ensureBucketSections(state.months[key]);
 }
 function getMonth(key, createIfMissing){
-  if(state.months[key]) return state.months[key];
+  if(state.months[key]) return ensureBucketSections(state.months[key]);
   return createIfMissing ? ensureMonth(key) : null;
 }
 
@@ -516,8 +569,11 @@ function applyChartTheme(){
   if(Chart.overrides && Chart.overrides.doughnut) Chart.overrides.doughnut.cutout = '68%';
 }
 /* Theme-aware colours for budget buckets and generic chart series. */
+const TONE_VARS = {nec:'--c-nec', extra:'--c-extra', play:'--c-play', save:'--c-save', debt:'--c-debt', rose:'--c-rose', plum:'--c-plum', teal:'--c-teal', sand:'--c-sand'};
 function bucketColor(key){
-  return cssVar({necessities:'--c-nec', extra:'--c-extra', playjar:'--c-play', savings:'--c-save', debt:'--c-debt', income:'--accent'}[key] || '--text-3');
+  if(key==='income') return cssVar('--accent');
+  const b = bucketById(key);
+  return cssVar((b && TONE_VARS[b.tone]) || '--text-3');
 }
 function chartPalette(){
   return ['--c-nec','--c-extra','--c-play','--c-save','--c-debt','--accent','--warning','--success','--danger','--text-3'].map(cssVar);
@@ -835,9 +891,29 @@ function applyGoalAllocationChange(goalId, newValue, scope){
   }
 }
 
+/* Budget and spending for each bucket in a month. rolloverFn adds last month's carried-over leftovers. */
+function bucketCalcs(key, m, plan, base, rolloverFn){
+  const [mStart, mEnd] = monthRange(key);
+  const out = {};
+  expenseSections(key).forEach(id=>{
+    const sec = m[id] || (m[id] = {expenses:[], budgetOverrides:{}});
+    const budgetBase = planAmount(plan, id, base);
+    const rolloverIn = rolloverFn ? rolloverFn(id) : 0;
+    const lentOut = lentSectionSpend(mStart, mEnd, id), lentBack = lentSectionBack(mStart, mEnd, id);
+    const budget = budgetBase + rolloverIn + lentBack;
+    const actual = sumBy(sec.expenses, e=>e.amount) + lentOut;
+    out[id] = {budget, budgetBase, actual, remaining:budget-actual, rolloverIn, lentOut, lentBack, share:Number((plan.alloc||{})[id])||0};
+  });
+  // Some screens read the original three directly; keep them defined even after a bucket is removed.
+  ['necessities','extra','playjar'].forEach(id=>{
+    if(!out[id]) out[id] = {budget:0, budgetBase:0, actual:0, remaining:0, rolloverIn:0, lentOut:0, lentBack:0, share:0, hidden:true};
+  });
+  return out;
+}
 function computeMonth(key){
   const m = getMonth(key, true);
   const s = state.settings;
+  const plan = planFor(key);
   const totalIncome = sumBy(m.income, i=>i.amount);
   const incomeByPerson = {};
   m.income.forEach(i=>{ incomeByPerson[i.person] = (incomeByPerson[i.person]||0) + Number(i.amount||0); });
@@ -846,47 +922,24 @@ function computeMonth(key){
   const debtPaymentsThisMonth = debtPaymentsInRange(mStart, mEnd);
   const borrowedFundsThisMonth = borrowedFundsInRange(mStart, mEnd);
   const totalCashReceived = totalIncome + borrowedFundsThisMonth;
-  // Debt is paid first: only what's actually paid toward debt reduces what's left to budget.
-  const budgetableIncome = totalIncome - debtPaymentsThisMonth;
+  // Debt-first: what's actually paid toward debt comes off income before the split.
+  // Otherwise the split uses total income and debt payments are spending in the Debt bucket.
+  const budgetableIncome = incomeBase(plan, totalIncome, debtPaymentsThisMonth);
 
   const prevKey = prevMonthKey(cur_yearOf(key), cur_moOf(key));
   const prevM = state.months[prevKey];
-  let prevCalc = null;
-  if(prevM) prevCalc = computeMonthShallow(prevKey);
-
-  function rolloverIn(section){
-    if(!prevCalc) return 0;
-    const decision = prevM.rollover[section];
-    if(decision === 'rollover'){
-      const remaining = prevCalc[section].remaining;
-      return remaining > 0 ? remaining : 0;
-    }
+  const prevCalc = prevM ? computeMonthShallow(prevKey) : null;
+  function rolloverIn(id){
+    if(!prevCalc || !prevCalc[id] || prevCalc[id].hidden) return 0;
+    if((prevM.rollover||{})[id] === 'rollover'){ const r = prevCalc[id].remaining; return r > 0 ? r : 0; }
     return 0;
   }
+  const buckets = bucketCalcs(key, m, plan, budgetableIncome, rolloverIn);
+  const sectionIds = expenseSections(key);
 
-  const necRolloverIn = rolloverIn('necessities');
-  const extRolloverIn = rolloverIn('extra');
-  const playRolloverIn = rolloverIn('playjar');
-
-  const necBudgetBase = budgetableIncome * s.allocations.necessities/100;
-  const extBudgetBase = budgetableIncome * s.allocations.extra/100;
-  const playBudgetBase = budgetableIncome * s.allocations.playjar/100;
-  const savAutoBase = budgetableIncome * s.allocations.savings/100; // Recommended target — reference only, never drives allocation
+  const savAutoBase = planAmount(plan, 'savings', budgetableIncome); // Recommended target — reference only, never drives allocation
   const hasAmountOverride = (m.savingsAmountOverride !== null && m.savingsAmountOverride !== undefined);
   const savingsAmount = hasAmountOverride ? Number(m.savingsAmountOverride) : Number(s.savingsAmountDefault)||0; // Monthly Savings Amount — what actually gets split across goals
-
-  const necBudget = necBudgetBase + necRolloverIn + lentSectionBack(mStart, mEnd, 'necessities');
-  const extBudget = extBudgetBase + extRolloverIn + lentSectionBack(mStart, mEnd, 'extra');
-  const playBudget = playBudgetBase + playRolloverIn + lentSectionBack(mStart, mEnd, 'playjar');
-
-  const necActual = sumBy(m.necessities.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'necessities');
-  const extActual = sumBy(m.extra.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'extra');
-  const playActual = sumBy(m.playjar.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'playjar');
-
-  const necRemaining = necBudget - necActual;
-  const extRemaining = extBudget - extActual;
-  const playRemaining = playBudget - playActual;
-
   const goalAllocOv = m.savingsGoalAllocOverrides || {};
   const goals = s.savingsGoals.map(g=>{
     const hasPctOverride = goalAllocOv[g.id]!==undefined;
@@ -900,49 +953,36 @@ function computeMonth(key){
   const unallocatedAmount = savingsAmount - totalPlannedAllocation;
   const savingsGoalPctTotal = sumBy(goals.filter(g=>g.active), g=>g.allocation);
 
-  const totalExpenses = necActual + extActual + playActual;
+  const totalExpenses = sumBy(sectionIds, id=>buckets[id].actual);
+  const debtBucket = plan.debtFirst ? null : (()=>{
+    const budget = planAmount(plan, 'debt', budgetableIncome);
+    return {budget, actual:debtPaymentsThisMonth, remaining:budget-debtPaymentsThisMonth, share:Number((plan.alloc||{}).debt)||0};
+  })();
   const netCashFlow = totalCashReceived - debtPaymentsThisMonth - totalExpenses - totalActualSavings + lentCashAdjust(mStart, mEnd);
   const savingsRate = totalIncome>0 ? (totalActualSavings/totalIncome*100) : 0;
-  const remainingBudgetOverall = necRemaining + extRemaining + playRemaining;
+  const remainingBudgetOverall = sumBy(sectionIds, id=>buckets[id].remaining) + (debtBucket ? debtBucket.remaining : 0);
+  // Zero-based: how much of this month's money hasn't been given a job yet.
+  const unassigned = plan.method==='zero' ? budgetableIncome - sumBy(planBucketIds(plan, key), id=>planAmount(plan, id, budgetableIncome)) : 0;
 
-  return {
-    key, totalIncome, incomeByPerson, borrowedFundsThisMonth, totalCashReceived, debtPaymentsThisMonth, budgetableIncome,
-    necessities:{budget:necBudget, budgetBase:necBudgetBase, actual:necActual, remaining:necRemaining, rolloverIn:necRolloverIn, lentOut:lentSectionSpend(mStart, mEnd, 'necessities'), lentBack:lentSectionBack(mStart, mEnd, 'necessities')},
-    extra:{budget:extBudget, budgetBase:extBudgetBase, actual:extActual, remaining:extRemaining, rolloverIn:extRolloverIn, lentOut:lentSectionSpend(mStart, mEnd, 'extra'), lentBack:lentSectionBack(mStart, mEnd, 'extra')},
-    playjar:{budget:playBudget, budgetBase:playBudgetBase, actual:playActual, remaining:playRemaining, rolloverIn:playRolloverIn, lentOut:lentSectionSpend(mStart, mEnd, 'playjar'), lentBack:lentSectionBack(mStart, mEnd, 'playjar')},
+  return Object.assign({}, buckets, {
+    key, plan, sectionIds, debtBucket, unassigned, totalIncome, incomeByPerson, borrowedFundsThisMonth, totalCashReceived, debtPaymentsThisMonth, budgetableIncome,
     savings:{budgetTotal:savingsAmount, autoBudgetTotal:savAutoBase, isCustomTarget:hasAmountOverride, actualTotal:totalActualSavings,
       remaining:savingsAmount-totalActualSavings, totalPlanned:totalPlannedAllocation, unallocated:unallocatedAmount,
       goals, goalPctTotal:savingsGoalPctTotal},
     totalExpenses, netCashFlow, savingsRate, remainingBudgetOverall,
     hasPrev: !!prevM, prevKey
-  };
+  });
 }
-/* shallow version without recursing into its own previous month rollover chain beyond 1 level, to avoid infinite recursion issues (rollover only looks back one month) */
+/* Lighter version used for last month's leftovers (no rollover chain, so no recursion). */
 function computeMonthShallow(key){
   const m = getMonth(key, true);
-  const s = state.settings;
+  const plan = planFor(key);
   const totalIncome = sumBy(m.income, i=>i.amount);
   const [mStart, mEnd] = monthRange(key);
   const debtPaymentsThisMonth = debtPaymentsInRange(mStart, mEnd);
-  const budgetableIncome = totalIncome - debtPaymentsThisMonth;
-  const necBudgetBase = budgetableIncome * s.allocations.necessities/100;
-  const extBudgetBase = budgetableIncome * s.allocations.extra/100;
-  const playBudgetBase = budgetableIncome * s.allocations.playjar/100;
-  const pkey = prevMonthKey(cur_yearOf(key), cur_moOf(key));
-  const pm = state.months[pkey];
-  let necIn=lentSectionBack(mStart, mEnd, 'necessities'), extIn=lentSectionBack(mStart, mEnd, 'extra'), playIn=lentSectionBack(mStart, mEnd, 'playjar');
-  if(pm){
-    const ppm = state.months[prevMonthKey(cur_yearOf(pkey), cur_moOf(pkey))];
-    // don't chain further back than one level for shallow calc
-  }
-  const necActual = sumBy(m.necessities.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'necessities');
-  const extActual = sumBy(m.extra.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'extra');
-  const playActual = sumBy(m.playjar.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'playjar');
-  return {
-    necessities:{budget:necBudgetBase+necIn, actual:necActual, remaining:(necBudgetBase+necIn)-necActual},
-    extra:{budget:extBudgetBase+extIn, actual:extActual, remaining:(extBudgetBase+extIn)-extActual},
-    playjar:{budget:playBudgetBase+playIn, actual:playActual, remaining:(playBudgetBase+playIn)-playActual}
-  };
+  const out = bucketCalcs(key, m, plan, incomeBase(plan, totalIncome, debtPaymentsThisMonth), null);
+  out.sectionIds = expenseSections(key);
+  return out;
 }
 function cur_yearOf(key){ return Number(key.split('-')[0]); }
 function cur_moOf(key){ return Number(key.split('-')[1])-1; }
@@ -953,11 +993,7 @@ function monthRange(key){
 
 function expenseLeafLabel(e){ return e.subCategory ? `${e.mainCategory} — ${e.subCategory}` : e.mainCategory; }
 function allExpensesForMonth(m){
-  return [].concat(
-    m.necessities.expenses.map(e=>({...e, section:'necessities'})),
-    m.extra.expenses.map(e=>({...e, section:'extra'})),
-    m.playjar.expenses.map(e=>({...e, section:'playjar'}))
-  );
+  return [].concat(...allBuckets().map(b=> ((m[b.id]||{}).expenses||[]).map(e=>({...e, section:b.id}))));
 }
 function topCategories(key, limit){
   const m = getMonth(key, true);
@@ -980,15 +1016,16 @@ function financialHealthScore(calc){
   let score = 0;
   const savScore = Math.max(0, Math.min(40, (calc.savingsRate/30)*40));
   score += savScore;
-  const sections = ['necessities','extra','playjar'];
+  const sections = calc.sectionIds;
+  const each = 40/Math.max(1, sections.length);
   let adherenceScore = 0;
   sections.forEach(sec=>{
     const d = calc[sec];
-    if(d.budget<=0){ adherenceScore += 40/3; return; }
-    if(d.remaining >= 0){ adherenceScore += 40/3; }
+    if(d.budget<=0){ adherenceScore += each; return; }
+    if(d.remaining >= 0){ adherenceScore += each; }
     else{
       const overRatio = Math.abs(d.remaining)/d.budget;
-      adherenceScore += Math.max(0, (40/3) * (1 - Math.min(overRatio,1)));
+      adherenceScore += Math.max(0, each * (1 - Math.min(overRatio,1)));
     }
   });
   score += adherenceScore;
@@ -1321,9 +1358,9 @@ function totalCashOutflow(calc){
    RENDER: SHELL
 ========================================================= */
 function navTo(view){
-  if(view==='expenses') view = curExpenseSection;
-  if(EXPENSE_SECTIONS.includes(view) && !EXPENSE_SECTIONS.includes(curView)) curExpandedCats = {}; // fresh visit: everything collapsed
-  if(EXPENSE_SECTIONS.includes(view)) curExpenseSection = view;
+  if(view==='expenses') view = expenseSections().includes(curExpenseSection) ? curExpenseSection : (expenseSections()[0] || 'necessities');
+  if(isExpenseSection(view) && !isExpenseSection(curView)) curExpandedCats = {}; // fresh visit: everything collapsed
+  if(isExpenseSection(view)) curExpenseSection = view;
   curView = view; curDebtDetailId = null; closeMenu();
   renderAll();
   window.scrollTo({top:0});
@@ -1394,8 +1431,9 @@ function renderTopChips(){
     ${ctx.isPastMonth ? '' : `<span class="top-chip sun" title="${escapeHtml(ctx.allowanceNote)}">${icon('sun')}<span><span class="chip-small">Daily Allowance</span><span class="chip-big">${money(Math.floor(ctx.dailyAllowance))} / day</span></span></span>`}`;
 }
 function allocationSplitLabel(){
-  const a = state.settings.allocations;
-  return `${a.necessities}/${a.savings}/${a.extra}/${a.playjar}`;
+  const p = planFor(monthKey(cur.year, cur.monthIndex));
+  if(p.method==='zero') return 'zero-based';
+  return planBucketIds(p).map(id=>Number((p.alloc||{})[id])||0).join('/');
 }
 function shiftMonth(delta){
   cur.monthIndex += delta;
@@ -1428,9 +1466,7 @@ function openAddMenu(anchor){
   const activeDebts = state.debts.filter(d=>debtBalance(d)>0);
   const items = [
     {heading:'Add expense'},
-    {label:'Necessities', icon:'house', tone:'c-nec', onClick:()=>openExpenseModal(key,'necessities',null)},
-    {label:'Extra expenses', icon:'shopping-bag', tone:'c-extra', onClick:()=>openExpenseModal(key,'extra',null)},
-    {label:'Play jar', icon:'party-popper', tone:'c-play', onClick:()=>openExpenseModal(key,'playjar',null)},
+    ...expenseSections(key).map(id=>({label:sectionLabel(id), icon:BUCKETS[id].icon, tone:'c-'+SECTION_TONE[id], onClick:()=>openExpenseModal(key,id,null)})),
     {sep:true},
     {label:'Income', icon:'banknote', tone:'success', onClick:()=>openIncomeModal(key,null)},
     {label:'Savings deposit', icon:'piggy-bank', tone:'c-save', onClick:()=>{ navTo('savings'); }},
@@ -1486,7 +1522,7 @@ function renderAll(){
   let viewHtml = '';
   if(curView==='dashboard') viewHtml = viewDashboard(key);
   else if(curView==='income') viewHtml = viewIncome(key);
-  else if(EXPENSE_SECTIONS.includes(curView)) viewHtml = viewSection(key, curView);
+  else if(isExpenseSection(curView)) viewHtml = viewSection(key, curView);
   else if(curView==='savings') viewHtml = viewSavings(key);
   else if(curView==='debts') viewHtml = viewDebts(key);
   else if(curView==='calendar') viewHtml = viewCalendar(key);
@@ -1496,7 +1532,7 @@ function renderAll(){
   attachViewHandlers(key);
   if(curView==='annual') drawAnnualCharts(curYearForAnnual);
   if(curView==='dashboard') drawDashboardDonut();
-  if(DONUT_SECTIONS.includes(curView)) drawSectionDonut(key, curView);
+  if(showsDonut(curView)) drawSectionDonut(key, curView);
 }
 
 /* =========================================================
@@ -1534,13 +1570,8 @@ function dashboardSectionOrder(){
 }
 
 /* ---------- Icons for buckets, categories, goals ---------- */
-const BUCKETS = {
-  necessities:{label:'Necessities', icon:'house', tone:'nec'},
-  extra:{label:'Extra Expenses', icon:'shopping-cart', tone:'extra'},
-  playjar:{label:'Play Jar', icon:'heart', tone:'play'},
-  savings:{label:'Savings Target', icon:'sprout', tone:'save'},
-  debt:{label:'Debt Payments', icon:'credit-card', tone:'debt'}
-};
+/* Bucket look-ups by id, e.g. BUCKETS[sec].icon. Reads the user's own buckets. */
+const BUCKETS = new Proxy({}, {get:(_, id)=>{ const b = bucketById(id); return b ? {label:b.name, icon:b.icon, tone:b.tone} : undefined; }});
 const CATEGORY_ICON_RULES = [
   [/rent|mortgage|housing|home|house/i,'house'], [/bill/i,'receipt'], [/subscri|stream|netflix|spotify/i,'repeat'],
   [/grocer|market/i,'shopping-basket'], [/dining|restaurant|eat out/i,'utensils-crossed'], [/food|meal|lunch|snack/i,'utensils'],
@@ -1569,7 +1600,7 @@ function goalIcon(name){
   return 'piggy-bank';
 }
 const GOAL_TONES = ['save','rose','nec','extra','play','debt'];
-const SECTION_TONE = {necessities:'nec', extra:'extra', playjar:'play'};
+const SECTION_TONE = new Proxy({}, {get:(_, id)=> (bucketById(id)||{}).tone});
 function upcomingIcon(it){
   if(it.kind==='payday') return {ic:'user', tone:'save'};
   if(it.kind==='income') return {ic:'banknote', tone:'nec'};
@@ -1786,7 +1817,7 @@ function doodleNote(kind, title, text){
 }
 /* A gentle, data-aware line of encouragement for the dashboard. */
 function encouragement(calc){
-  const secs = ['necessities','extra','playjar'];
+  const secs = calc.sectionIds;
   const over = secs.filter(s=> calc[s].budget>0 && calc[s].actual > calc[s].budget);
   const saved = calc.savings.actualTotal, target = calc.savings.budgetTotal;
   if(!calc.totalIncome && !calc.totalExpenses) return {title:'A fresh page', line:'Add this month’s income to get started.', art:'books'};
@@ -1827,7 +1858,8 @@ function dashboardCtx(key){
   const isCurrentRealMonth = (cur.year===today.getFullYear() && cur.monthIndex===today.getMonth());
   const isPastMonth = (new Date(cur.year, cur.monthIndex, 1)) < (new Date(today.getFullYear(), today.getMonth(), 1));
   let daysLeft, dailyAllowance, allowanceNote;
-  const discretionary = calc.extra.remaining + calc.playjar.remaining;
+  const flexIds = calc.sectionIds.filter(id=>(bucketById(id)||{}).flexible);
+  const discretionary = sumBy(flexIds, id=>calc[id].remaining);
   if(isPastMonth){
     daysLeft = 0; dailyAllowance = 0; allowanceNote = 'This month has ended.';
   } else {
@@ -1837,7 +1869,7 @@ function dashboardCtx(key){
       allowanceNote = discretionary < 0 ? 'Discretionary budget exceeded.' : 'No discretionary budget left.';
     } else {
       dailyAllowance = discretionary / daysLeft;
-      allowanceNote = 'From remaining Extra Expenses + Play Jar';
+      allowanceNote = `From what's left in ${flexIds.map(sectionLabel).join(' + ') || 'your flexible buckets'}`;
     }
   }
   const prev = calc.hasPrev ? computeMonthShallowFull(calc.prevKey) : null;
@@ -1864,7 +1896,7 @@ function viewDashboard(key){
   if(calc.hasPrev){
     const prevM = state.months[calc.prevKey];
     const prevCalc = computeMonthShallow(calc.prevKey);
-    const undecided = ['necessities','extra','playjar'].filter(sec=> prevM.rollover[sec]===null && prevCalc[sec].remaining > 0);
+    const undecided = prevCalc.sectionIds.filter(sec=> (prevM.rollover||{})[sec]==null && prevCalc[sec].remaining > 0);
     if(undecided.length){
       rolloverBanner = `<div class="banner gold">
         <div class="banner-text" style="display:flex;gap:12px;align-items:flex-start;"><span class="badge-ic sm t-warn">${icon('sparkles')}</span><span><strong>Leftover budget from ${MONTH_NAMES[cur_moOf(calc.prevKey)]}</strong><br>
@@ -1906,9 +1938,9 @@ function viewDashboard(key){
       <div class="hero-banner-text">
         <div class="hero-pair">
           <div class="hero-fig">
-            <h2 class="hero-fig-title">Available to Budget <span class="info-dot" title="Income this month minus debt payments — the amount your budget split is based on.">${icon('info','ic-sm')}</span></h2>
+            <h2 class="hero-fig-title">Available to Budget <span class="info-dot" title="${calc.plan.debtFirst ? 'Income this month minus debt payments — the amount your budget split is based on.' : 'Total income this month — the amount your budget split is based on. Debt payments have their own bucket.'}">${icon('info','ic-sm')}</span></h2>
             <div class="hero-big">${money(calc.budgetableIncome)}</div>
-            <div class="hero-note">after debt payments</div>
+            <div class="hero-note">${calc.plan.debtFirst ? 'after debt payments' : 'total income'}</div>
           </div>
           <span class="hero-fig-split" aria-hidden="true"></span>
           <div class="hero-fig">
@@ -1923,7 +1955,7 @@ function viewDashboard(key){
 
     <div class="kpi3">
       ${kpiCard('This Month’s Income', 'leaf', 'save', calc.totalIncome, deltaInfo(calc.totalIncome, prev && prev.totalIncome, true), 'income')}
-      ${kpiCard('Total Expenses', 'receipt', 'extra', calc.necessities.actual + calc.extra.actual, deltaInfo(calc.necessities.actual + calc.extra.actual, prev && (prev.necActual + prev.extActual), false), 'necessities')}
+      ${kpiCard('Total Expenses', 'receipt', 'extra', totalSpendCounted(calc), deltaInfo(totalSpendCounted(calc), prev && totalSpendCountedPrev(prev), false), calc.sectionIds[0] || 'necessities')}
       ${kpiCard('Debt Paid', 'credit-card', 'rose', calc.debtPaymentsThisMonth, deltaInfo(calc.debtPaymentsThisMonth, prev && prev.debtPaymentsThisMonth, false), 'debts')}
       ${kpiCard('Saved This Month', 'piggy-bank', 'sky', calc.savings.actualTotal, deltaInfo(calc.savings.actualTotal, prev && prev.savingsActualTotal, true), 'savings')}
     </div>
@@ -1973,29 +2005,26 @@ function kpiCard(label, ic, tone, value, delta, view, display){
     </div>
   </div>`;
 }
+/* "Total Expenses" counts only the buckets marked to count toward it (by default Necessities + Extra). */
+function totalSpendCounted(calc){ return sumBy(calc.sectionIds.filter(id=>(bucketById(id)||{}).inTotal), id=>calc[id].actual); }
+function totalSpendCountedPrev(p){ return sumBy(Object.entries(p.actualBy||{}).filter(([id])=>(bucketById(id)||{}).inTotal), ([,v])=>v); }
 function budgetRowsData(calc){
-  const a = state.settings.allocations;
-  return [
-    {key:'necessities', view:'necessities', pctA:a.necessities, actual:calc.necessities.actual, budget:calc.necessities.budget},
-    {key:'extra', view:'extra', pctA:a.extra, actual:calc.extra.actual, budget:calc.extra.budget},
-    {key:'playjar', view:'playjar', pctA:a.playjar, actual:calc.playjar.actual, budget:calc.playjar.budget},
-    {key:'savings', view:'savings', pctA:a.savings, actual:calc.savings.actualTotal, budget:calc.savings.budgetTotal}
-  ];
+  const rows = calc.sectionIds.map(id=>({key:id, view:id, label:sectionLabel(id), pctA:calc[id].share, actual:calc[id].actual, budget:calc[id].budget}));
+  if(calc.debtBucket) rows.push({key:'debt', view:'debts', label:'Debt Payments', pctA:calc.debtBucket.share, actual:calc.debtBucket.actual, budget:calc.debtBucket.budget});
+  rows.push({key:'savings', view:'savings', label:'Savings', pctA:Number((calc.plan.alloc||{}).savings)||0, actual:calc.savings.actualTotal, budget:calc.savings.budgetTotal});
+  return rows;
 }
 function spendingSlices(calc){
-  return [
-    {key:'necessities', label:'Necessities', amount:calc.necessities.actual},
-    {key:'extra', label:'Extra Expenses', amount:calc.extra.actual},
-    {key:'playjar', label:'Play Jar', amount:calc.playjar.actual},
-    {key:'debt', label:'Debt Payments', amount:calc.debtPaymentsThisMonth},
-    {key:'savings', label:'Savings', amount:calc.savings.actualTotal}
-  ];
+  return calc.sectionIds.map(id=>({key:id, label:sectionLabel(id), amount:calc[id].actual}))
+    .concat([{key:'debt', label:'Debt Payments', amount:calc.debtPaymentsThisMonth}, {key:'savings', label:'Savings', amount:calc.savings.actualTotal}]);
 }
+/* Tone class per bucket id, e.g. tone.necessities === 'nec'. */
+const BUCKET_TONE = new Proxy({}, {get:(_, k)=> (bucketById(k)||{}).tone || 'muted'});
 /* Budget overview: donut of where the month's money went, legend with amounts and shares. */
 function budgetDonut(calc){
   const slices = spendingSlices(calc);
   const total = sumBy(slices, s=>s.amount);
-  const tone = {necessities:'nec', extra:'extra', playjar:'play', debt:'debt', savings:'save'};
+  const tone = BUCKET_TONE;
   const budget = sumBy(budgetRowsData(calc), r=>r.budget);
   return `<div class="bd-wrap">
     ${total>0 ? `<div class="donut-wrap"><canvas id="dashDonut" aria-label="Where this month's money went"></canvas>
@@ -2007,7 +2036,8 @@ function budgetDonut(calc){
       <span class="bd-amt">${money(Math.round(s.amount))}</span>
       <span class="bd-pct">${total>0?pct(s.amount/total*100):'—'}</span>
     </button>`).join('')}
-    ${budget>0?`<div class="bd-foot">${money(Math.round(total))} used of ${money(Math.round(budget))} planned</div>`:''}</div>
+    ${budget>0?`<div class="bd-foot">${money(Math.round(total))} used of ${money(Math.round(budget))} planned</div>`:''}
+    ${calc.plan.method==='zero' && Math.abs(calc.unassigned)>=0.5 ? `<div class="bd-foot ${calc.unassigned<0?'neg':''}">${calc.unassigned>0 ? `${money(calc.unassigned)} not assigned to a bucket yet` : `Plan assigns ${money(-calc.unassigned)} more than this month’s money`}</div>` : ''}</div>
   </div>`;
 }
 /* Draws percentages on the donut slices themselves. */
@@ -2051,8 +2081,8 @@ function drawDashboardDonut(){
 /* Spending breakdown: this month's top categories across all expense sections. */
 function categoryBars(ctx){
   const totals = {};
-  ['necessities','extra','playjar'].forEach(sec=>{
-    (ctx.m[sec].expenses||[]).forEach(e=>{
+  ctx.calc.sectionIds.forEach(sec=>{
+    ((ctx.m[sec]||{}).expenses||[]).forEach(e=>{
       const k = e.mainCategory || 'Other';
       if(!totals[k]) totals[k] = {name:k, sec, amount:0};
       totals[k].amount += Number(e.amount)||0;
@@ -2174,7 +2204,7 @@ function searchEverything(q){
   const out = [];
   Object.keys(state.months).sort().reverse().forEach(k=>{
     const m = state.months[k];
-    ['necessities','extra','playjar'].forEach(sec=> (m[sec].expenses||[]).forEach(e=>{
+    allBuckets().forEach(({id:sec})=> ((m[sec]||{}).expenses||[]).forEach(e=>{
       const text = `${e.description||''} ${e.mainCategory||''} ${e.subCategory||''}`.toLowerCase();
       if(text.includes(q)) out.push({type:'Expense', icon:catIconFor(sec, e.mainCategory, e.subCategory), tone:catTone(sec, e.mainCategory, e.subCategory), title:e.description || expenseLeafLabel(e), sub:`${expenseLeafLabel(e)} · ${fmtDateLong(e.date)}`, amount:-e.amount, go:{month:k, view:sec}});
     }));
@@ -2211,7 +2241,7 @@ function openSearchResult(r){
   navTo(r.go.view);
 }
 function expensesByCategoryTable(ctx){
-  const secs = curDashCatFilter==='all' ? ['necessities','extra','playjar'] : [curDashCatFilter];
+  const secs = curDashCatFilter==='all' ? ctx.calc.sectionIds : [curDashCatFilter];
   let rows = [];
   secs.forEach(sec=>{
     categoryBudgetRows(ctx.m, sec, ctx.key).forEach(r=>{
@@ -2260,15 +2290,13 @@ function sectionCashFlowCard(ctx){
   return `
     ${line('Income (+ borrowed funds)', calc.totalCashReceived)}
     ${line('Debt Payments', calc.debtPaymentsThisMonth, true)}
-    <div style="display:flex;justify-content:space-between;padding:6px 0 12px;font-weight:600;font-size:14px;border-bottom:1px dashed var(--line);margin-bottom:12px;"><span>Budgetable Income</span><span>${money(calc.budgetableIncome)}</span></div>
-    ${line('Necessities', calc.necessities.actual, true)}
-    ${line('Extra Expenses', calc.extra.actual, true)}
-    ${line('Play Jar', calc.playjar.actual, true)}
+    <div style="display:flex;justify-content:space-between;padding:6px 0 12px;font-weight:600;font-size:14px;border-bottom:1px dashed var(--line);margin-bottom:12px;"><span>Available to Budget</span><span>${money(calc.budgetableIncome)}</span></div>
+    ${calc.sectionIds.map(id=>line(sectionLabel(id), calc[id].actual, true)).join('')}
     ${line('Actual Savings', calc.savings.actualTotal, true)}
     <div class="divider"></div>
     <div class="stat-label">Available Cash</div>
     <div class="hero-num" style="color:${calc.netCashFlow>=0?'var(--sage-dark)':'var(--danger)'};">${money(calc.netCashFlow)}</div>
-    <p class="help-text" style="margin-top:10px;">Every debt payment automatically adjusts your available ${allocationSplitLabel()} budget — there's no fixed debt amount to hit.</p>
+    <p class="help-text" style="margin-top:10px;">${calc.plan.debtFirst ? 'Debt payments come off your income before the budget split, so your buckets adjust automatically.' : 'Your budget is split from total income; debt payments use the Debt bucket.'}</p>
   `;
 }
 function debtPrincipalProgress(){
@@ -2300,12 +2328,7 @@ function sectionDebtPaydown(ctx){
 }
 function sectionBudgetVsActual(ctx){
   const calc = ctx.calc;
-  const buckets = [
-    {label:'Necessities', actual:calc.necessities.actual, budget:calc.necessities.budget},
-    {label:'Savings', actual:calc.savings.actualTotal, budget:calc.savings.budgetTotal},
-    {label:'Extra Expenses', actual:calc.extra.actual, budget:calc.extra.budget},
-    {label:'Play Jar', actual:calc.playjar.actual, budget:calc.playjar.budget}
-  ];
+  const buckets = budgetRowsData(calc).map(r=>({label:r.label, actual:r.actual, budget:r.budget}));
   return `<table style="margin-bottom:14px;">
     <thead><tr><th>Bucket</th><th class="num">Budget</th><th class="num">Actual</th><th class="num">Remaining</th></tr></thead>
     <tbody>${buckets.map(b=>`<tr><td>${b.label}</td><td class="num">${money(b.budget)}</td><td class="num">${money(b.actual)}</td><td class="num">${money(b.budget-b.actual)}</td></tr>`).join('')}</tbody>
@@ -2379,7 +2402,7 @@ function sectionUpcoming(ctx){
 }
 function sectionSpendingBreakdown(ctx){
   const m = ctx.m;
-  const expenseBlocks = ['necessities','extra','playjar'].map(sec=>{
+  const expenseBlocks = ctx.calc.sectionIds.map(sec=>{
     const rows = categoryBudgetRows(m, sec, ctx.key).filter(r=>r.actual>0);
     if(!rows.length) return '';
     return `<details style="margin-bottom:10px;">
@@ -2438,12 +2461,13 @@ function sectionMonthProgress(ctx){
   const dayOfMonth = ctx.isPastMonth ? days : (ctx.isCurrentRealMonth ? today.getDate() : (ctx.days-ctx.daysLeft+1));
   const pctMonth = Math.min(100, dayOfMonth/days*100);
   const calc = ctx.calc;
-  const budgetTotal = calc.necessities.budget+calc.extra.budget+calc.playjar.budget;
-  const actualTotal = calc.necessities.actual+calc.extra.actual+calc.playjar.actual;
+  const budgetTotal = sumBy(calc.sectionIds, id=>calc[id].budget);
+  const actualTotal = sumBy(calc.sectionIds, id=>calc[id].actual);
   const pctBudgetSpent = budgetTotal>0 ? Math.min(999,actualTotal/budgetTotal*100) : 0;
   const pctSavingsAchieved = calc.savings.budgetTotal>0 ? Math.min(999,calc.savings.actualTotal/calc.savings.budgetTotal*100) : 0;
-  const discBudget = calc.extra.budget+calc.playjar.budget;
-  const discActual = calc.extra.actual+calc.playjar.actual;
+  const flexIds = calc.sectionIds.filter(id=>(bucketById(id)||{}).flexible);
+  const discBudget = sumBy(flexIds, id=>calc[id].budget);
+  const discActual = sumBy(flexIds, id=>calc[id].actual);
   const pctDiscUsed = discBudget>0 ? Math.min(999,discActual/discBudget*100) : 0;
   return `
     <div class="progress-top" style="margin-bottom:6px;"><span>Day ${dayOfMonth} of ${days}</span><span>${pct(pctMonth)} of month elapsed</span></div>
@@ -2473,7 +2497,7 @@ function sectionNotes(ctx){
   return `<textarea id="monthNotes" placeholder="Anything worth remembering about this month?">${escapeHtml(ctx.m.notes)}</textarea>
     <div class="btn-row" style="margin-top:10px;"><button class="btn btn-primary btn-sm" data-action="save-notes">Save note</button></div>`;
 }
-function sectionLabel(sec){ return sec==='necessities'?'Necessities':sec==='extra'?'Extra Expenses':'Play Jar'; }
+function sectionLabel(sec){ const b = bucketById(sec); return b ? b.name : sec; }
 function progressBar(label, actual, budget){
   const p = budget>0 ? (actual/budget*100) : (actual>0?100:0);
   const cls = p<=85?'ok':(p<=100?'warn':'over');
@@ -2500,30 +2524,28 @@ function renderComparison(key, calc){
   }
   return line('Income', calc.totalIncome, prevCalc.totalIncome, false)
     + line('Debt payments', calc.debtPaymentsThisMonth, prevCalc.debtPaymentsThisMonth, true)
-    + line('Budgetable income', calc.budgetableIncome, prevCalc.budgetableIncome, false)
-    + line('Necessities', calc.necessities.actual, prevCalc.necActual, true)
-    + line('Extra Expenses', calc.extra.actual, prevCalc.extActual, true)
-    + line('Play Jar', calc.playjar.actual, prevCalc.playActual, true)
+    + line('Available to budget', calc.budgetableIncome, prevCalc.budgetableIncome, false)
+    + calc.sectionIds.map(id=>line(sectionLabel(id), calc[id].actual, (prevCalc.actualBy||{})[id]||0, true)).join('')
     + line('Savings', calc.savings.actualTotal, prevCalc.savingsActualTotal, false)
     + line('Total cash outflow', totalCashOutflow(calc), prevCalc.totalCashOutflow, true)
     + line('Available cash', calc.netCashFlow, prevCalc.netCashFlow, false);
 }
 function computeMonthShallowFull(key){
   const m = getMonth(key,true);
-  const s = state.settings;
+  const plan = planFor(key);
   const totalIncome = sumBy(m.income, i=>i.amount);
-  const necActual = sumBy(m.necessities.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'necessities');
-  const extActual = sumBy(m.extra.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'extra');
-  const playActual = sumBy(m.playjar.expenses, e=>e.amount) + lentSectionSpend(...monthRange(key), 'playjar');
-  const totalExpenses = necActual+extActual+playActual;
-  const savingsActualTotal = sumBy(Object.values(m.savingsActuals), v=>v);
   const [mStart, mEnd] = monthRange(key);
+  const actualBy = {};
+  expenseSections(key).forEach(id=>{ actualBy[id] = sumBy((m[id]||{expenses:[]}).expenses, e=>e.amount) + lentSectionSpend(mStart, mEnd, id); });
+  const necActual = actualBy.necessities||0, extActual = actualBy.extra||0, playActual = actualBy.playjar||0;
+  const totalExpenses = sumBy(Object.values(actualBy), v=>v);
+  const savingsActualTotal = sumBy(Object.values(m.savingsActuals), v=>v);
   const debtPaymentsThisMonth = debtPaymentsInRange(mStart, mEnd);
   const borrowedFundsThisMonth = borrowedFundsInRange(mStart, mEnd);
   const netCashFlow = (totalIncome+borrowedFundsThisMonth) - totalExpenses - savingsActualTotal - debtPaymentsThisMonth + lentCashAdjust(mStart, mEnd);
   const savingsRate = totalIncome>0 ? savingsActualTotal/totalIncome*100 : 0;
-  return {totalIncome, totalExpenses, necActual, extActual, playActual, savingsActualTotal, netCashFlow, savingsRate, debtPaymentsThisMonth, borrowedFundsThisMonth,
-    budgetableIncome: totalIncome-debtPaymentsThisMonth,
+  return {totalIncome, totalExpenses, actualBy, necActual, extActual, playActual, savingsActualTotal, netCashFlow, savingsRate, debtPaymentsThisMonth, borrowedFundsThisMonth,
+    budgetableIncome: incomeBase(plan, totalIncome, debtPaymentsThisMonth),
     totalCashOutflow: totalExpenses+savingsActualTotal+debtPaymentsThisMonth};
 }
 
@@ -2641,7 +2663,8 @@ function viewIncome(key){
 let curExpenseCatFilter = 'all';
 let curExpenseSearch = '';
 /* Necessities & Extra Expenses pages: donut of this month's spending split by main category. */
-const DONUT_SECTIONS = ['necessities', 'extra'];
+/* Buckets that count toward Total Expenses also get the category pie chart on their page. */
+function showsDonut(id){ const b = bucketById(id); return !!(b && b.inTotal); }
 const CAT_COLORS = ['#627F5F','#E8C9A8','#E79B8B','#8FB7D9','#D9A657','#A7C4A0','#C9A27E','#B7A1C9','#6E7B8B','#F1C7A8'];
 function sectionSlices(catRows){
   return catRows.filter(c=>c.actual>0).sort((a,b)=>b.actual-a.actual).map((c,i)=>({label:c.main, amount:c.actual, color:CAT_COLORS[i % CAT_COLORS.length]}));
@@ -2696,7 +2719,7 @@ function viewSection(key, sec){
     ${pageHead('Expenses', `${MONTH_NAMES[cur.monthIndex]} ${cur.year}`,
       `<button class="btn" data-action="manage-categories" data-section="${sec}">${icon('tags','ic-sm')}Manage Categories</button>
        <button class="btn btn-peach" data-action="add-expense" data-section="${sec}">${icon('plus','ic-sm')}Add Expense</button>`)}
-    <div class="section-tabs" role="tablist">${EXPENSE_SECTIONS.map(x=>`<button role="tab" aria-selected="${x===sec}" class="${x===sec?'active':''}" data-action="goto" data-view="${x}"><span class="badge-ic t-${SECTION_TONE[x]}">${icon(BUCKETS[x].icon)}</span>${sectionLabel(x)}</button>`).join('')}</div>
+    <div class="section-tabs" role="tablist">${expenseSections(key).map(x=>`<button role="tab" aria-selected="${x===sec}" class="${x===sec?'active':''}" data-action="goto" data-view="${x}"><span class="badge-ic t-${SECTION_TONE[x]}">${icon(BUCKETS[x].icon)}</span>${sectionLabel(x)}</button>`).join('')}</div>
 
     <div class="card sec-summary">
       <span class="badge-ic lg t-${tone}">${icon(BUCKETS[sec].icon)}</span>
@@ -2706,7 +2729,7 @@ function viewSection(key, sec){
           <span class="br-amt"><b ${ratio>1.0001?'style="color:var(--danger-ink)"':''}>${money(calc.actual)}</b> <span>/ ${money(calc.budget)}</span></span>
         </div>
         ${barHtml(ratio, tone)}
-        <div class="sec-summary-meta">${pct(state.settings.allocations[sec]||0)} of budgetable income${calc.rolloverIn>0?` · includes ${money(calc.rolloverIn)} rolled over`:''}${calc.lentOut>0?` · includes ${money(calc.lentOut)} lent out`:''}${calc.lentBack>0?` · ${money(calc.lentBack)} repaid back to this budget`:''}</div>
+        <div class="sec-summary-meta">${planFor(key).method==='zero' ? `${money(calc.budgetBase)} assigned in your plan` : `${pct(calc.share)} of ${incomeBaseLabel(planFor(key))}`}${calc.rolloverIn>0?` · includes ${money(calc.rolloverIn)} rolled over`:''}${calc.lentOut>0?` · includes ${money(calc.lentOut)} lent out`:''}${calc.lentBack>0?` · ${money(calc.lentBack)} repaid back to this budget`:''}</div>
       </div>
       <div class="sec-summary-stats">
         <div><span>Remaining</span><b class="${calc.remaining>=0?'pos':'neg'}">${money(calc.remaining)}</b></div>
@@ -2714,8 +2737,8 @@ function viewSection(key, sec){
       </div>
     </div>
 
-    <div class="page-2col ${DONUT_SECTIONS.includes(sec)?'page-3col':''}">
-      ${DONUT_SECTIONS.includes(sec) ? `<div class="card sec-donut-card">
+    <div class="page-2col ${showsDonut(sec)?'page-3col':''}">
+      ${showsDonut(sec) ? `<div class="card sec-donut-card">
         <div class="card-head"><h3 class="card-title">Spending by Category</h3><span class="card-chip">${MONTH_NAMES[cur.monthIndex].slice(0,3)} ${cur.year}</span></div>
         ${sectionDonut(catRows, calc)}
       </div>` : ''}
@@ -2817,7 +2840,7 @@ function viewSavings(key){
         <div style="text-align:right;margin-top:8px;color:var(--text-2);font-size:14px;">${pct(ratio*100)} of target</div>
         <div class="divider"></div>
         <div class="kv-list">
-          <div><span>Recommended (${pct(state.settings.allocations.savings||0)} of budgetable income)</span><b>${money(calc.autoBudgetTotal)}</b></div>
+          <div><span>Recommended (${planFor(key).method==='zero' ? 'from your budget plan' : planShareLabel(planFor(key),'savings')+' of '+incomeBaseLabel(planFor(key))})</span><b>${money(calc.autoBudgetTotal)}</b></div>
           <div><span>Planned across goals</span><b>${money(calc.totalPlanned)}</b></div>
           <div><span>Unallocated</span><b class="${Math.abs(calc.unallocated)<1?'':'neg'}">${money(calc.unallocated)}</b></div>
           <div><span>Savings rate</span><b>${pct(rateOfIncome)} of income</b></div>
@@ -2902,6 +2925,7 @@ function viewDebts(key){
       ${kpiCard('Total Balance', 'target', 'rose', t.totalOutstanding, null)}
       ${kpiCard('Total Paid (All Time)', 'wallet', 'nec', t.totalPaid, null)}
       ${kpiCard(`Payments in ${MONTH_NAMES[cur.monthIndex]}`, 'user', 'save', paidThisMonth, null)}
+      ${planFor(key).debtFirst ? '' : (()=>{ const db = computeMonth(key).debtBucket; return kpiCard('Debt Budget Left', 'wallet', db.remaining<0?'rose':'nec', db.remaining, null, null, null); })()}
       ${t.overdueCount ? kpiCard('Overdue Payments', 'circle-alert', 'rose', null, null, null, `${t.overdueCount}`) : ''}
     </div>
     ${pillTabs('debt', DEBT_TABS, curDebtTab)}
@@ -3306,14 +3330,14 @@ function annualData(year){
   const totalBudgetable = sumBy(monthCalcs, x=>x.calc.budgetableIncome);
   const net = totalIncome-totalExpenses-totalSavings-totalDebtPaid;
   const n = monthCalcs.length||1;
-  const catTotals = {necessities:0, extra:0, playjar:0};
+  const catTotals = {}; allBuckets().forEach(b=>{ catTotals[b.id] = 0; });
   const categoryTotals = {};
   const goalTotals = {};
   state.settings.savingsGoals.forEach(g=> goalTotals[g.id]={goal:g, name:g.name, target:g.target, total:0});
   monthCalcs.forEach(x=>{
     const m = state.months[x.key];
-    ['necessities','extra','playjar'].forEach(sec=>{
-      m[sec].expenses.forEach(e=>{
+    allBuckets().forEach(({id:sec})=>{
+      ((m[sec]||{}).expenses||[]).forEach(e=>{
         catTotals[sec]+=Number(e.amount||0);
         const k = sec+'|'+e.mainCategory;
         if(!categoryTotals[k]) categoryTotals[k] = {sec, main:e.mainCategory, total:0};
@@ -3352,14 +3376,10 @@ function viewAnnual(year){
   `;
 }
 function reportOverview(A){
-  const slices = [
-    {key:'necessities', label:'Necessities', amount:A.catTotals.necessities},
-    {key:'extra', label:'Extra Expenses', amount:A.catTotals.extra},
-    {key:'playjar', label:'Play Jar', amount:A.catTotals.playjar},
-    {key:'debt', label:'Debt Payments', amount:A.totalDebtPaid}
-  ];
+  const slices = allBuckets().filter(b=>!b.removedFrom || A.catTotals[b.id]>0).map(b=>({key:b.id, label:b.name, amount:A.catTotals[b.id]||0}))
+    .concat([{key:'debt', label:'Debt Payments', amount:A.totalDebtPaid}]);
   const total = sumBy(slices, s=>s.amount);
-  const tone = {necessities:'nec', extra:'extra', playjar:'play', debt:'debt'};
+  const tone = BUCKET_TONE;
   const mn = x=> x ? `${MONTH_NAMES[x.i]}` : '—';
   return `
     <div class="kpi-row">
@@ -3392,7 +3412,7 @@ function reportOverview(A){
 }
 function reportCategories(A){
   const max = Math.max(1, ...A.categories.map(c=>c.total));
-  const sec = [['necessities','Necessities'],['extra','Extra Expenses'],['playjar','Play Jar']];
+  const sec = allBuckets().filter(b=>!b.removedFrom || A.catTotals[b.id]>0).map(b=>[b.id, b.name]);
   return `<div class="page-2col">
     <div class="card">
       <div class="card-head"><h3 class="card-title">By Section</h3><span class="card-chip">${money(A.totalExpenses)}</span></div>
@@ -3516,7 +3536,7 @@ function drawAnnualCharts(year){
   const dctx = document.getElementById('annualSpendDonut');
   if(dctx){
     const A = annualData(year);
-    const slices = [['necessities',A.catTotals.necessities],['extra',A.catTotals.extra],['playjar',A.catTotals.playjar],['debt',A.totalDebtPaid]].filter(s=>s[1]>0);
+    const slices = allBuckets().map(b=>[b.id, A.catTotals[b.id]||0]).concat([['debt', A.totalDebtPaid]]).filter(s=>s[1]>0);
     chartRegistry['annualSpend'] = new Chart(dctx, {
       type:'doughnut',
       data:{ labels:slices.map(s=>BUCKETS[s[0]].label), datasets:[{data:slices.map(s=>s[1]), backgroundColor:slices.map(s=>bucketColor(s[0])), borderWidth:0, spacing:2}] },
@@ -3548,23 +3568,193 @@ const SETTINGS_TABS = [
   {id:'appearance', label:'Appearance & App'},
   {id:'data', label:'Data & Account'}
 ];
+/* ---------- Settings → Budget: the plan editor ----------
+   The draft lives here while you edit; nothing changes until "Save plan". */
+let planDraft = null;
+function planDraftFresh(){
+  const key = monthKey(cur.year, cur.monthIndex);
+  const p = planFor(key);
+  return {ctx:key, from:key, method:p.method, debtFirst:p.debtFirst, alloc:Object.assign({}, p.alloc)};
+}
+function planMonthMoney(plan, key){
+  const m = state.months[key];
+  const income = m ? sumBy(m.income, i=>i.amount) : 0;
+  const [a, b] = monthRange(key);
+  const debt = debtPaymentsInRange(a, b);
+  return {income, debt, base: incomeBase(plan, income, debt)};
+}
+function monthLabelLong(key){ return `${MONTH_NAMES[cur_moOf(key)]} ${cur_yearOf(key)}`; }
+function planStatus(d){
+  const ids = planBucketIds(d, d.from);
+  const total = sumBy(ids, id=>Number(d.alloc[id])||0);
+  if(d.method==='percent'){
+    const ok = Math.abs(total-100) < 0.005;
+    return {ok, total, html: ok ? `<span class="card-chip">${icon('circle-check','ic-sm')}Total 100%</span>` : `<span class="card-chip rose">Total ${+total.toFixed(2)}% · needs 100%</span>`};
+  }
+  const left = planMonthMoney(d, d.from).base - total;
+  const ok = Math.abs(left) < 0.5;
+  return {ok, total, left, html: ok ? `<span class="card-chip">${icon('circle-check','ic-sm')}Every peso assigned</span>`
+    : left > 0 ? `<span class="card-chip rose">${money(left)} left to assign</span>` : `<span class="card-chip rose">${money(-left)} over</span>`};
+}
+function budgetPlanCard(){
+  if(planDraft && planDraft.ctx !== monthKey(cur.year, cur.monthIndex)) planDraft = null; // switched months: start from that month
+  const d = planDraft || (planDraft = planDraftFresh());
+  const before = planFor(d.from);
+  const mon = planMonthMoney(d, d.from), monBefore = planMonthMoney(before, d.from);
+  const ids = planBucketIds(d, d.from);
+  const pctMode = d.method==='percent';
+  const st = planStatus(d);
+  const later = budgetPlans().filter(p=>p.from > d.from);
+  return `<div class="card settings-group" id="planCard">
+    <div class="card-head"><h3 class="card-title">Budget Plan</h3><span id="planStatus">${st.html}</span></div>
+    <p class="small-muted" style="margin-top:-8px;margin-bottom:16px;">How each month’s money is split across your buckets. A change applies from the month you choose onward, and earlier months keep their own plan.</p>
+    <div class="plan-top">
+      <div class="field" style="margin:0;"><label>Applies from</label><input type="month" id="planFrom" value="${d.from}"></div>
+      <div class="field" style="margin:0;"><label>Method</label>
+        <div class="plan-methods" role="radiogroup">
+          <button type="button" class="plan-method ${pctMode?'active':''}" data-action="plan-method" data-method="percent" role="radio" aria-checked="${pctMode}">Percentages</button>
+          <button type="button" class="plan-method ${!pctMode?'active':''}" data-action="plan-method" data-method="zero" role="radio" aria-checked="${!pctMode}">Zero-based (₱ amounts)</button>
+        </div>
+      </div>
+    </div>
+    <label class="toggle-row"><input type="checkbox" id="planDebtFirst" ${d.debtFirst?'checked':''}><span><b>Deduct debt payments before budgeting</b>
+      <small>${d.debtFirst ? 'On: the month’s actual debt payments come off income first, then the rest is split.' : 'Off: your budget is split from total income, and debt payments come out of a Debt bucket.'}</small></span></label>
+    <div class="plan-formula">${monthLabelLong(d.from)}: ${d.debtFirst
+      ? `Income ${money(mon.income)} − debt payments ${money(mon.debt)} = <b>${money(mon.base)}</b> to budget`
+      : `Income ${money(mon.income)} = <b>${money(mon.base)}</b> to budget`}</div>
+    <div class="tbl-wrap"><table class="tbl plan-tbl">
+      <thead><tr><th>Bucket</th><th class="num">${pctMode?'Share %':'Amount'}</th><th class="num">Now</th><th class="num">With this plan</th></tr></thead>
+      <tbody>${ids.map(id=>{
+        const b = bucketById(id);
+        const nowAmt = planBucketIds(before, d.from).includes(id) ? planAmount(before, id, monBefore.base) : 0;
+        return `<tr>
+          <td><span class="cat-name"><span class="badge-ic xs t-${b.tone}">${icon(b.icon)}</span>${escapeHtml(b.name)}</span></td>
+          <td class="num"><div class="input-affix plan-input">${pctMode?'':`<span class="affix">${currencySymbol()}</span>`}<input type="number" min="0" step="${pctMode?'0.5':'0.01'}" data-plan-alloc="${id}" value="${Number(d.alloc[id])||0}" aria-label="${escapeHtml(b.name)} ${pctMode?'percent':'amount'}" ${pctMode?'style="padding-left:12px;"':''}>${pctMode?'<span class="affix" style="left:auto;right:12px;">%</span>':''}</div></td>
+          <td class="num muted-cell">${money(nowAmt)}</td>
+          <td class="num"><b data-plan-amt="${id}">${money(planAmount(d, id, mon.base))}</b></td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>
+    ${later.length ? `<p class="help-text" style="margin-top:10px;">Saving will replace ${later.length} plan${later.length===1?'':'s'} set for later months (from ${later.map(p=>monthLabelLong(p.from)).join(', ')}).</p>` : ''}
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
+      <button class="btn btn-primary btn-sm" data-action="save-plan">Save plan</button>
+      <button class="btn btn-sm" data-action="reset-plan">Undo changes</button>
+    </div>
+  </div>`;
+}
+/* Typing a share only refreshes the totals and amounts, so the input keeps focus. */
+function refreshPlanNumbers(){
+  const d = planDraft; if(!d) return;
+  const mon = planMonthMoney(d, d.from);
+  document.querySelectorAll('[data-plan-amt]').forEach(el=>{ el.textContent = money(planAmount(d, el.dataset.planAmt, mon.base)); });
+  const st = document.getElementById('planStatus'); if(st) st.innerHTML = planStatus(d).html;
+}
+function rerenderPlanCard(){
+  const el = document.getElementById('planCard'); if(!el) return;
+  el.outerHTML = budgetPlanCard();
+  wirePlanCard();
+}
+function wirePlanCard(){
+  const card = document.getElementById('planCard'); if(!card || !planDraft) return;
+  card.querySelectorAll('[data-plan-alloc]').forEach(inp=> inp.addEventListener('input', ()=>{ planDraft.alloc[inp.dataset.planAlloc] = Number(inp.value)||0; refreshPlanNumbers(); }));
+  const from = document.getElementById('planFrom');
+  if(from) from.addEventListener('change', ()=>{ if(/^\d{4}-\d{2}$/.test(from.value)){ planDraft.from = from.value; rerenderPlanCard(); } });
+  const df = document.getElementById('planDebtFirst');
+  if(df) df.addEventListener('change', ()=>{ planDraft.debtFirst = df.checked; rerenderPlanCard(); });
+}
+function savePlanDraft(){
+  const d = planDraft; if(!d) return;
+  const st = planStatus(d);
+  if(d.method==='percent' && !st.ok){ alertDialog('Shares must add up to 100%', `They add up to ${+st.total.toFixed(2)}% right now.`); return; }
+  const commit = ()=>{
+    const ids = planBucketIds(d, d.from);
+    const alloc = {}; ids.forEach(id=>{ alloc[id] = Number(d.alloc[id])||0; });
+    state.settings.budgetPlans = budgetPlans().filter(p=>p.from < d.from).concat([{from:d.from, method:d.method, debtFirst:d.debtFirst, alloc}]).sort((a,b)=>a.from.localeCompare(b.from));
+    if(d.method==='percent') state.settings.allocations = Object.assign({}, state.settings.allocations, alloc);
+    planDraft = null;
+    saveState(); renderAll(); toast(`Budget plan saved from ${monthLabelLong(d.from)}`);
+  };
+  if(d.method==='zero' && !st.ok){
+    return confirmModal(st.left > 0 ? `${money(st.left)} of ${monthLabelLong(d.from)}’s money isn’t assigned to a bucket yet. Save anyway?` : `This plan assigns ${money(-st.left)} more than ${monthLabelLong(d.from)}’s money. Save anyway?`, commit);
+  }
+  commit();
+}
+
+/* ---------- Settings → Budget: buckets ---------- */
+function bucketManagerCard(){
+  const key = monthKey(cur.year, cur.monthIndex);
+  const row = (b, fixed)=>`<div class="bucket-row ${b.removedFrom?'removed':''}">
+      <span class="badge-ic t-${b.tone}">${icon(b.icon)}</span>
+      <span class="bucket-text"><b>${escapeHtml(b.name)}</b><small>${fixed || [b.inTotal?'Counts in Total Expenses':'', b.flexible?'Counts toward Daily Allowance':''].filter(Boolean).join(' · ') || 'Own budget only'}${b.removedFrom?` · removed from ${monthLabelLong(b.removedFrom)}`:''}</small></span>
+      ${fixed ? '' : `<span class="bucket-actions">
+        <button class="btn btn-sm" data-action="edit-bucket" data-id="${b.id}">${icon('pencil','ic-sm')}Edit</button>
+        ${b.removedFrom ? `<button class="btn btn-sm" data-action="restore-bucket" data-id="${b.id}">${icon('undo-2','ic-sm')}Bring back</button>`
+          : `<button class="btn btn-sm" data-action="remove-bucket" data-id="${b.id}">${icon('trash-2','ic-sm')}Remove</button>`}
+      </span>`}
+    </div>`;
+  return `<div class="card settings-group">
+    <div class="card-head"><h3 class="card-title">Buckets</h3><button class="card-chip" data-action="add-bucket">${icon('plus','ic-sm')}Add bucket</button></div>
+    <p class="small-muted" style="margin-top:-8px;margin-bottom:12px;">Each bucket has its own tab under Expenses, its own categories and its own budget. New buckets start at 0, so give them a share in the Budget Plan above.</p>
+    <div class="bucket-list">
+      ${allBuckets().map(b=>row(b)).join('')}
+      ${row(SPECIAL_BUCKETS.savings, 'Always on · your savings goals live here')}
+      ${planFor(key).debtFirst ? '' : row(SPECIAL_BUCKETS.debt, 'Appears because debt payments aren’t deducted first · spending = debt payments recorded')}
+    </div>
+  </div>`;
+}
+function openBucketModal(id){
+  const existing = id ? allBuckets().find(b=>b.id===id) : null;
+  const b = existing || {name:'', icon:'', tone:BUCKET_TONES.find(t=>!allBuckets().some(x=>x.tone===t)) || 'plum', inTotal:true, flexible:false};
+  const body = `
+    <div class="field"><label>Name</label><input type="text" id="f-bname" value="${escapeHtml(b.name)}" placeholder="e.g. Baby, Business, Pets" maxlength="40"></div>
+    ${iconFieldHtml('f-bicon', b.icon, 'Icon', {tone:b.tone, nameSrc:'f-bname', autoIcon:categoryIcon(b.name)})}
+    <div class="field"><label>Colour</label><div class="tone-swatches">${BUCKET_TONES.map(t=>`<label class="tone-swatch t-${t}"><input type="radio" name="f-btone" value="${t}" ${b.tone===t?'checked':''}><span></span></label>`).join('')}</div></div>
+    <label class="toggle-row"><input type="checkbox" id="f-binTotal" ${b.inTotal?'checked':''}><span><b>Count in Total Expenses</b><small>Adds it to the dashboard’s Total Expenses tile and gives its page a category pie chart.</small></span></label>
+    <label class="toggle-row"><input type="checkbox" id="f-bflex" ${b.flexible?'checked':''}><span><b>Counts toward Daily Allowance</b><small>What’s left in it adds to how much you can spend per day.</small></span></label>`;
+  openModal(existing ? 'Edit bucket' : 'Add bucket', body, ()=>{
+    const name = document.getElementById('f-bname').value.trim();
+    if(!name){ showFormError('Give the bucket a name.'); return false; }
+    if(allBuckets().some(x=>x.id!==(existing&&existing.id) && x.name.toLowerCase()===name.toLowerCase()) || ['savings','debt payments'].includes(name.toLowerCase())){ showFormError('You already have a bucket with that name.'); return false; }
+    const tone = (document.querySelector('input[name="f-btone"]:checked')||{}).value || b.tone;
+    const fields = {name, icon:document.getElementById('f-bicon').value || categoryIcon(name), tone,
+      inTotal:document.getElementById('f-binTotal').checked, flexible:document.getElementById('f-bflex').checked};
+    if(existing) Object.assign(existing, fields);
+    else {
+      const nb = Object.assign({id:uid('bkt'), removedFrom:null}, fields);
+      allBuckets().push(nb);
+      state.settings.categoryTree[nb.id] = leafCatTree(['Miscellaneous']);
+      state.settings.categoryDefaults[nb.id] = {};
+      Object.values(state.months).forEach(ensureBucketSections);
+      planDraft = null;
+    }
+    saveState(); renderAll();
+    toast(existing ? 'Bucket updated' : `${name} added — give it a share in your Budget Plan`);
+    return true;
+  }, {submitLabel:'Save'});
+}
+function removeBucket(id){
+  const b = allBuckets().find(x=>x.id===id); if(!b) return;
+  const key = monthKey(cur.year, cur.monthIndex);
+  const stillFunded = budgetPlans().some(p=> (p.from >= key || p===planFor(key)) && Number((p.alloc||{})[id]));
+  if(stillFunded){ alertDialog(`Set ${b.name} to 0 first`, `In the Budget Plan, give ${b.name} a share of 0 from ${monthLabelLong(key)} onward, so its money goes to your other buckets. Then remove it.`); return; }
+  const bills = state.recurringBills.filter(r=>r.active && r.section===id);
+  if(bills.length){ alertDialog(`${b.name} still has recurring bills`, `Move or pause ${bills.map(r=>r.name).join(', ')} first.`); return; }
+  confirmModal(`Remove ${b.name} from ${monthLabelLong(key)} onward? Earlier months keep its expenses, and you can bring it back any time.`, ()=>{
+    b.removedFrom = key;
+    if(curExpenseSection===id) curExpenseSection = expenseSections()[0] || 'necessities';
+    planDraft = null;
+    saveState(); renderAll(); toast(`${b.name} removed`);
+  });
+}
+
 function viewSettings(){
   const s = state.settings;
   let body = '';
   if(curSettingsTab==='budget'){
-    const a = s.allocations;
-    const totalA = a.necessities+a.savings+a.extra+a.playjar;
     body = `
-      <div class="card settings-group">
-        <div class="card-head"><h3 class="card-title">Budget Allocation</h3><span class="card-chip ${totalA===100?'':'rose'}">Total ${totalA}%</span></div>
-        <p class="small-muted" style="margin-top:-8px;margin-bottom:14px;">How your budgetable income (income after debt payments) is split each month. Must add up to 100%.</p>
-        <div class="alloc-grid">
-          ${[['allocNec','necessities','Necessities'],['allocSav','savings','Savings'],['allocExt','extra','Extra Expenses'],['allocPlay','playjar','Play Jar']].map(([id,k,l])=>`
-            <div class="field"><label><span class="badge-ic xs t-${BUCKETS[k].tone}" style="margin-right:6px;">${icon(BUCKETS[k].icon)}</span>${l} %</label><input type="number" id="${id}" value="${a[k]}" min="0" max="100"></div>`).join('')}
-        </div>
-        <button class="btn btn-primary btn-sm" data-action="save-allocations">Save allocation</button>
-      </div>
-      ${['necessities','extra','playjar'].map(sec=>budgetDefaultsTable(sec, sectionLabel(sec))).join('')}`;
+      ${budgetPlanCard()}
+      ${bucketManagerCard()}
+      ${expenseSections().map(sec=>budgetDefaultsTable(sec, sectionLabel(sec))).join('')}`;
   } else if(curSettingsTab==='alerts'){
     const a = alertSettings();
     body = `<div class="card settings-group">
@@ -3665,6 +3855,7 @@ function budgetDefaultsTable(sec, label){
    EVENT HANDLERS
 ========================================================= */
 function attachViewHandlers(key){
+  if(curView==='settings' && curSettingsTab==='budget') wirePlanCard(); else planDraft = null;
   const main = document.getElementById('mainContent');
   main.onclick = (e)=>{
     const tab = e.target.closest('[data-debt-tab]');
@@ -3811,6 +4002,22 @@ function handleAction(action, el, key){
   if(action==='customize-dashboard') return openDashboardCustomizeModal();
   if(action==='set-money-view'){ curDashboardMoneyView = el.dataset.view; renderAll(); return; }
 
+  if(action==='plan-method'){
+    const d = planDraft; if(!d || d.method===el.dataset.method) return;
+    // Convert the shares so the split stays the same: 50% becomes its peso amount, and back.
+    const base = planMonthMoney(d, d.from).base;
+    planBucketIds(d, d.from).forEach(id=>{
+      const v = Number(d.alloc[id])||0;
+      d.alloc[id] = el.dataset.method==='zero' ? Math.round(base*v/100*100)/100 : (base>0 ? Math.round(v/base*1000)/10 : 0);
+    });
+    d.method = el.dataset.method; rerenderPlanCard(); return;
+  }
+  if(action==='save-plan') return savePlanDraft();
+  if(action==='reset-plan'){ planDraft = null; rerenderPlanCard(); return; }
+  if(action==='add-bucket') return openBucketModal(null);
+  if(action==='edit-bucket') return openBucketModal(el.dataset.id);
+  if(action==='remove-bucket') return removeBucket(el.dataset.id);
+  if(action==='restore-bucket'){ const b = allBuckets().find(x=>x.id===el.dataset.id); if(b){ b.removedFrom = null; saveState(); renderAll(); toast(`${b.name} is back`); } return; }
   if(action==='save-allocations'){
     const nec=Number(document.getElementById('allocNec').value)||0;
     const sav=Number(document.getElementById('allocSav').value)||0;
@@ -4130,7 +4337,8 @@ function openOnboardingModal(){
     const err = captureStep();
     if(err) return render(err);
     if(step<3){ step++; return render(); }
-    Object.assign(state.settings, {householdName:draft.householdName, currency:draft.currency, allocations:draft.allocations, onboarded:true});
+    Object.assign(state.settings, {householdName:draft.householdName, currency:draft.currency, allocations:draft.allocations, onboarded:true,
+      budgetPlans:[{from:'0000-01', method:'percent', debtFirst:true, alloc:Object.assign({}, draft.allocations)}]});
     state.settings.earners = draft.earners.map(e=>Object.assign({id:e.id||uid('earner')}, e));
     saveState();
     root.hidden = true; root.innerHTML = '';
@@ -4304,7 +4512,7 @@ function computeAlerts(){
   const m = getMonth(key, true);
   const warn = (Number(cfg.warnAt)||80)/100;
   const out = [];
-  ['necessities','extra','playjar'].forEach(sec=>{
+  calc.sectionIds.forEach(sec=>{
     const c = calc[sec];
     if(c.budget<=0) return;
     const r = c.actual/c.budget;
@@ -4408,7 +4616,7 @@ function exportCSV(year){
   Object.keys(state.months).sort().forEach(k=>{
     const m = state.months[k];
     (m.income||[]).forEach(i=>{ if(inYear(i.date)) rows.push([i.date,'Income','','','',i.description||'Salary',earnerName(i.person),Number(i.amount)||0]); });
-    ['necessities','extra','playjar'].forEach(sec=> (m[sec].expenses||[]).forEach(e=>{
+    allBuckets().forEach(({id:sec})=> ((m[sec]||{}).expenses||[]).forEach(e=>{
       if(inYear(e.date)) rows.push([e.date,'Expense',sectionLabel(sec),e.mainCategory||'',e.subCategory||'',e.description||'','',-(Number(e.amount)||0)]);
     }));
     Object.entries(m.savingsActuals||{}).forEach(([gid,amt])=>{
@@ -4897,7 +5105,7 @@ function openRecordSavingsModal(key, goalId){
 function openSavingsAmountModal(key){
   const calc = computeMonth(key);
   const body = `
-    <p class="small-muted">Recommended target (${pct(state.settings.allocations.savings||0,0)} of this month's budgetable income): <strong style="color:var(--ink);">${money(calc.savings.autoBudgetTotal)}</strong></p>
+    <p class="small-muted">Recommended target (${planFor(key).method==='zero' ? 'from your budget plan' : planShareLabel(planFor(key),'savings')+' of '+incomeBaseLabel(planFor(key))}): <strong style="color:var(--ink);">${money(calc.savings.autoBudgetTotal)}</strong></p>
     <div class="field"><label>How much can we save this month? (${currencySymbol()})</label>
       <input type="number" id="f-amount" min="0" step="0.01" value="${calc.savings.budgetTotal}">
     </div>
@@ -5046,7 +5254,7 @@ function openDebtModal(id, side){
         <option value="cash" ${srcValue==='cash'?'selected':''}>Available cash — lowers Available Cash until repaid</option>
         ${goalsForSource.length ? `<optgroup label="A savings goal — repayments refill it">${goalsForSource.map(g=>`<option value="goal:${g.id}" ${srcValue==='goal:'+g.id?'selected':''}>${escapeHtml(g.name)}</option>`).join('')}</optgroup>` : ''}
         <optgroup label="A budget section — counts as spending this month">
-          ${EXPENSE_SECTIONS.map(x=>`<option value="section:${x}" ${srcValue==='section:'+x?'selected':''}>${sectionLabel(x)}</option>`).join('')}
+          ${expenseSections().map(x=>`<option value="section:${x}" ${srcValue==='section:'+x?'selected':''}>${sectionLabel(x)}</option>`).join('')}
         </optgroup>
       </select>
       <div class="help-text" id="f-source-help"></div>
@@ -5251,9 +5459,7 @@ function openRecurringModal(id){
     <div class="field-row">
       <div class="field"><label>Section</label>
         <select id="f-section">
-          <option value="necessities" ${initialSection==='necessities'?'selected':''}>Necessities</option>
-          <option value="extra" ${initialSection==='extra'?'selected':''}>Extra expenses</option>
-          <option value="playjar" ${initialSection==='playjar'?'selected':''}>Play jar</option>
+          ${allBuckets().filter(b=>!b.removedFrom || b.id===initialSection).map(b=>`<option value="${b.id}" ${initialSection===b.id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}
         </select>
       </div>
       <div class="field"><label>Main category</label><select id="f-main">${mainOptionsHtml(initialSection, initialMain)}</select></div>
