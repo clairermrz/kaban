@@ -2946,6 +2946,11 @@ function accountMovements(acc){
   state.debts.forEach(d=>{
     if(d.accountId===acc.id) add(d.dateBorrowed, +d.principal, `Borrowed from ${d.lender}`, 'borrowed', {debt:d.id});
     d.payments.forEach(p=>{ if(p.accountId===acc.id) add(p.date, -p.amount, `Payment to ${d.lender}`, 'debtpay', {debt:d.id}); });
+    // Borrowed from one of your own accounts: the money left it, and each repayment goes back in.
+    if(d.fromAccountId===acc.id){
+      add(d.dateBorrowed, -d.principal, `Borrowed out · ${d.lender}`, 'lentself', {debt:d.id});
+      d.payments.forEach(p=> add(p.date, +p.amount, `Paid back · ${d.lender}`, 'repaidself', {debt:d.id}));
+    }
   });
   loansGiven().forEach(l=>{
     if(l.accountId===acc.id) add(l.dateBorrowed, -l.principal, `Lent to ${l.lender}`, 'lent', {debt:l.id});
@@ -2976,6 +2981,13 @@ function accountFieldHtml(current, label){
   const list = accountsList().filter(a=>!a.archived || a.id===sel);
   return `<div class="field"><label>${label||'Account'}</label>
     <select id="f-account"><option value="">Not tracked</option>${list.map(a=>`<option value="${a.id}" ${sel===a.id?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>`;
+}
+function accountSelectHtml(id, label, current, hint){
+  if(!accountsList().length) return '';
+  const list = accountsList().filter(a=>!a.archived || a.id===current);
+  return `<div class="field"><label>${label}</label>
+    <select id="${id}"><option value="">Not one of my accounts</option>${list.map(a=>`<option value="${a.id}" ${current===a.id?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select>
+    ${hint?`<div class="help-text">${hint}</div>`:''}</div>`;
 }
 function readAccountField(){ const el = document.getElementById('f-account'); return el ? (el.value || null) : undefined; }
 
@@ -3038,6 +3050,10 @@ function accountDetailView(a){
       ${kpiCard('Money In', 'arrow-down-left', 'sky', sumBy(moves.filter(x=>x.amount>0), x=>x.amount), null)}
       ${kpiCard('Money Out', 'arrow-up-right', 'rose', -sumBy(moves.filter(x=>x.amount<0), x=>x.amount), null)}
     </div>
+    ${(()=>{ const early = accountEarlierEntries(a); if(!early.length) return '';
+      const first = early.reduce((m,x)=> x.date < m ? x.date : m, early[0].date);
+      return `<div class="banner gold"><div class="banner-text" style="display:flex;gap:12px;align-items:flex-start;"><span class="badge-ic sm t-warn">${icon('info')}</span><span><strong>${early.length} entr${early.length===1?'y':'ies'} dated before ${fmtDateLong(a.openingDate)} ${early.length===1?'isn’t':'aren’t'} counted</strong><br>They’re treated as already part of the opening balance of ${money(Number(a.openingBalance)||0)}. If that balance was from before them, count them.</span></div>
+        <div class="banner-actions"><button class="btn btn-sm" data-action="account-count-earlier" data-id="${a.id}" data-date="${first}">Count from ${fmtDateHuman(first)}</button></div></div>`; })()}
     <div class="card">
       <div class="card-head"><h3 class="card-title">Activity</h3><span class="card-chip">Since ${fmtDateLong(a.openingDate)}</span></div>
       ${moves.length ? `<div class="tbl-wrap"><table class="tbl">
@@ -3108,6 +3124,7 @@ function openTransferModal(id, fromId){
     if(!from || !to || from===to){ showFormError('Pick two different accounts.'); return false; }
     if(!amount || amount<=0 || !date){ showFormError('Enter an amount and date.'); return false; }
     const rec = {from, to, amount, fee, date, note:document.getElementById('f-tnote').value.trim()};
+    checkBeforeOpening([from, to], date, 'transfer');
     if(existing) Object.assign(existing, rec);
     else (state.transfers || (state.transfers = [])).push(Object.assign({id:uid('xfer')}, rec));
     saveState(); renderAll(); toast('Transfer saved'); return true;
@@ -3133,6 +3150,21 @@ function openAdjustModal(accountId, adjustId){
     else if(amount!==0) (state.adjustments || (state.adjustments = [])).push({id:uid('adj'), accountId:a.id, amount, date, note});
     saveState(); renderAll(); toast(amount===0 ? 'Balance already matches' : 'Balance adjusted'); return true;
   }, {submitLabel:'Save'});
+}
+/* An entry dated before an account's opening balance is treated as already inside that balance.
+   Say so when it happens, and offer to count it by moving the account's start date back. */
+function checkBeforeOpening(accountIds, date, what){
+  const a = (Array.isArray(accountIds) ? accountIds : [accountIds]).map(id=> id && accountById(id)).find(x=> x && date && date < (x.openingDate||''));
+  if(!a) return;
+  setTimeout(()=>{
+    askDialog({title:`Not in ${a.name}’s balance yet`, icon:'info', cancelLabel:'Keep as is', confirmLabel:'Count it',
+      message:`${a.name}’s opening balance is as of ${fmtDateLong(a.openingDate)}, and this ${what} is dated ${fmtDateLong(date)}, so it’s treated as already included in that opening balance. If your opening balance was from before this money moved, count it: ${a.name} will start counting from ${fmtDateLong(date)} (the opening balance stays ${money(Number(a.openingBalance)||0)}).`
+    }).then(ok=>{ if(!ok) return; a.openingDate = date; saveState(); renderAll(); toast(`${a.name} now counts entries from ${fmtDateLong(date)}`); });
+  }, 60);
+}
+/* Tagged entries dated before the opening date (left out of the balance). */
+function accountEarlierEntries(a){
+  return accountMovements(Object.assign({}, a, {openingDate:'0000-00-00'})).filter(x=> x.date < (a.openingDate||''));
 }
 function accountHasRecords(a){
   return accountMovements(Object.assign({}, a, {openingDate:'0000-00-00'})).length > 0;
@@ -4195,6 +4227,7 @@ function handleAction(action, el, key){
   if(action==='add-account') return openAccountModal(null);
   if(action==='edit-account') return openAccountModal(el.dataset.id);
   if(action==='view-account'){ curAccountId = el.dataset.id; if(curView!=='accounts'){ curView = 'accounts'; } renderAll(); window.scrollTo({top:0}); return; }
+  if(action==='account-count-earlier'){ const a = accountById(el.dataset.id); if(a){ a.openingDate = el.dataset.date; saveState(); renderAll(); toast(`${a.name} now counts entries from ${fmtDateLong(a.openingDate)}`); } return; }
   if(action==='back-to-accounts'){ curAccountId = null; renderAll(); return; }
   if(action==='add-transfer') return openTransferModal(null, el.dataset.from);
   if(action==='edit-transfer') return openTransferModal(el.dataset.id);
@@ -4657,6 +4690,7 @@ function openIncomeModal(key, id, prefill){
     const description = document.getElementById('f-desc').value;
     if(!date || !amount || amount<=0){ showFormError('Enter a valid date and amount.'); return false; }
     const accountId = readAccountField();
+    checkBeforeOpening(accountId, date, 'income');
     if(existing){ Object.assign(existing, {date, person:personV, amount, description}); if(accountId!==undefined) existing.accountId = accountId; }
     else {
       // File new income under the month it was received in.
@@ -5008,6 +5042,7 @@ function openExpenseModal(key, sec, id, prefill){
     const before = budgetSnapshot(key, sec, mainCategory);
     setTimeout(()=>budgetCrossingToast(key, sec, mainCategory, before), 0);
     const accountId = readAccountField();
+    checkBeforeOpening(accountId, date, 'expense');
     if(existing){ existing.date=date; existing.mainCategory=mainCategory; existing.subCategory=subCategory; existing.description=description; existing.amount=amount; if(accountId!==undefined) existing.accountId = accountId; }
     else{
       const rec = {id:uid('exp'), date, mainCategory, subCategory, description, amount};
@@ -5423,6 +5458,7 @@ function openRecordSavingsModal(key, goalId, depositId){
     const from = (document.getElementById('f-from')||{}).value || null;
     const to = (document.getElementById('f-to')||{}).value || null;
     if(from && to && from===to){ showFormError('“Taken from” and “Saved into” are the same account.'); return false; }
+    checkBeforeOpening([from, to], date, 'savings deposit');
     if(existing){
       m.savingsActuals[goalId] = total - existing.amount + amount;
       Object.assign(existing, {amount, date, from, to});
@@ -5616,6 +5652,7 @@ function openDebtModal(id, side){
     </div>
 
     ${accountFieldHtml(existing ? (existing.accountId||'') : undefined, lent ? 'Paid from' : 'Received into')}
+    ${lent ? '' : accountSelectHtml('f-fromAccount', 'Borrowed from', existing ? (existing.fromAccountId||'') : '', 'If you borrowed from one of your own accounts (e.g. your savings), pick it: the money comes out of it now, and every payment you record goes back into it.')}
     <div id="grp-standard">
       <div class="field"><label>Due date (optional)</label><input type="date" id="f-dueDate" value="${existing&&existing.dueDate?existing.dueDate:''}"></div>
       <div class="field"><label>Interest</label>
@@ -5684,7 +5721,13 @@ function openDebtModal(id, side){
     }
     debt.lender = lender; debt.borrower = borrower; debt.repaymentType = repaymentType;
     debt.principal = principal; debt.dateBorrowed = dateBorrowed;
-    { const acc = readAccountField(); if(acc!==undefined) debt.accountId = acc; }
+    { const acc = readAccountField(); if(acc!==undefined) debt.accountId = acc;
+      const fromEl = document.getElementById('f-fromAccount');
+      if(fromEl){
+        if(fromEl.value && fromEl.value===acc){ showFormError('“Borrowed from” and “Received into” are the same account.'); return false; }
+        debt.fromAccountId = fromEl.value || null;
+      }
+      checkBeforeOpening([acc, fromEl && fromEl.value], dateBorrowed, 'loan'); }
     if(repaymentType==='standard'){
       debt.dueDate = document.getElementById('f-dueDate').value || null;
       const mode = document.getElementById('f-interestMode').value;
@@ -5779,6 +5822,7 @@ function openDebtPaymentModal(debtId, paymentId){
     const note = document.getElementById('f-note').value;
     if(!date || !amount || amount<=0){ showFormError('Enter a valid date and amount.'); return false; }
     const accountId = readAccountField();
+    checkBeforeOpening(accountId, date, lent ? 'repayment' : 'payment');
     if(existing){ existing.date=date; existing.amount=amount; existing.note=note; if(accountId!==undefined) existing.accountId = accountId; }
     else d.payments.push(Object.assign({id:uid('pay'), date, amount, note}, accountId ? {accountId} : {}));
     saveState(); renderAll(); return true;
