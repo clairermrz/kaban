@@ -1960,3 +1960,30 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}
 .tone-swatch.t-teal span{background:var(--c-teal);}
 .tone-swatch.t-sand span{background:var(--c-sand);}
 .tone-swatch{background:none !important;}
+
+/* ===== Accounts ===== */
+.account-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:16px;}
+.account-card{margin:0;cursor:pointer;display:flex;flex-direction:column;gap:10px;padding:18px 20px !important;transition:transform .12s, box-shadow .12s;}
+.account-card:hover{transform:translateY(-1px);box-shadow:var(--shadow-md);}
+.account-card.archived{opacity:.65;}
+.account-top{display:flex;align-items:center;gap:12px;}
+.account-name{display:flex;flex-direction:column;flex:1;min-width:0;}
+.account-name b{font-family:var(--font-serif);font-size:16px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.account-name small{font-size:12px;color:var(--text-2);}
+.account-bal{font-family:var(--font-serif);font-weight:600;font-size:clamp(22px, 1.8vw, 27px);letter-spacing:-.01em;}
+.account-bal.neg{color:var(--danger-ink);}
+.account-tags{display:flex;gap:6px;flex-wrap:wrap;min-height:4px;}
+b.pos{color:var(--success-ink);}
+.hero-links{display:flex;gap:8px;flex-wrap:wrap;}
+.hero-net{border-color:color-mix(in srgb, var(--c-nec) 40%, transparent);background:var(--c-nec-tint);color:var(--c-nec-ink);}
+
+/* Savings deposits list in the Add savings form */
+.dep-list{border:1px solid var(--border);border-radius:12px;margin-bottom:14px;overflow:hidden;}
+.dep-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto 64px;gap:10px;align-items:center;padding:8px 12px;font-size:13.5px;border-top:1px dashed var(--border);}
+.dep-row:first-child{border-top:none;}
+.dep-row .muted-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.dep-row b{font-family:var(--font-serif);white-space:nowrap;}
+.dep-row.editing{background:var(--accent-tint);}
+.dep-total{background:var(--surface-2);font-weight:700;}
+.dep-actions{display:flex;justify-content:flex-end;gap:2px;}
+.dep-actions .icon-btn{width:28px;height:28px;}

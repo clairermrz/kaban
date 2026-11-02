@@ -7,6 +7,7 @@ const NAV_ITEMS = [
   {id:'expenses', label:'Expenses', icon:'shopping-bag', get match(){ return allBuckets().map(b=>b.id); }},
   {id:'savings', label:'Savings', icon:'piggy-bank'},
   {id:'debts', label:'Debts', icon:'credit-card'},
+  {id:'accounts', label:'Accounts', icon:'wallet'},
   {id:'calendar', label:'Calendar', icon:'calendar-days'},
   {id:'annual', label:'Reports', icon:'chart-column'},
   {id:'settings', label:'Settings', icon:'settings'}
@@ -18,7 +19,7 @@ const BOTTOM_NAV = [
   {id:'expenses', label:'Expenses', icon:'shopping-bag', get match(){ return allBuckets().map(b=>b.id); }},
   {id:'__add'},
   {id:'calendar', label:'Calendar', icon:'calendar-days'},
-  {id:'__more', label:'More', icon:'ellipsis', match:['income','savings','debts','annual','settings']}
+  {id:'__more', label:'More', icon:'ellipsis', match:['income','savings','debts','accounts','annual','settings']}
 ];
 
 function firstMondayOfYear(y){
@@ -127,7 +128,7 @@ function defaultMonth(){
   };
 }
 function defaultState(){
-  return { settings: defaultSettings(), recurringBills: [], recurringIncome: [], months: {}, debts: [], loansGiven: [] };
+  return { settings: defaultSettings(), recurringBills: [], recurringIncome: [], months: {}, debts: [], loansGiven: [], accounts: [], transfers: [], adjustments: [] };
 }
 
 /* Replaced with the signed-in user's data by bootApp() (called from cloud.js). */
@@ -229,6 +230,9 @@ function normalizeState(s){
   });
   if(!s.debts) s.debts = [];
   if(!s.loansGiven) s.loansGiven = [];
+  if(!Array.isArray(s.accounts)) s.accounts = [];
+  if(!Array.isArray(s.transfers)) s.transfers = [];
+  if(!Array.isArray(s.adjustments)) s.adjustments = [];
   s.loansGiven.forEach(l=>{ if(!l.payments) l.payments = []; if(!l.lateFee) l.lateFee = {mode:'none', amount:null, percent:null}; if(!l.source) l.source = {type:'cash'}; });
   s.debts.forEach(d=>{ if(!d.payments) d.payments = []; if(!d.lateFee) d.lateFee = {mode:'none', amount:null, percent:null}; });
   (s.settings.savingsGoals||[]).forEach(g=>{ if(g.active===undefined) g.active = true; });
@@ -320,6 +324,7 @@ let curYearForAnnual = today.getFullYear();
 let curDebtTab = 'overview';
 let curDebtSide = 'owe'; // 'owe' = debts you have, 'lent' = money others owe you
 let curDebtDetailId = null;
+let curAccountId = null; // account whose activity is open on the Accounts page
 let curDebtSearch = '';
 let curDebtTypeFilter = 'all';
 let curDebtStatusFilter = 'all';
@@ -1361,7 +1366,7 @@ function navTo(view){
   if(view==='expenses') view = expenseSections().includes(curExpenseSection) ? curExpenseSection : (expenseSections()[0] || 'necessities');
   if(isExpenseSection(view) && !isExpenseSection(curView)) curExpandedCats = {}; // fresh visit: everything collapsed
   if(isExpenseSection(view)) curExpenseSection = view;
-  curView = view; curDebtDetailId = null; closeMenu();
+  curView = view; curDebtDetailId = null; curAccountId = null; closeMenu();
   renderAll();
   window.scrollTo({top:0});
 }
@@ -1525,6 +1530,7 @@ function renderAll(){
   else if(isExpenseSection(curView)) viewHtml = viewSection(key, curView);
   else if(curView==='savings') viewHtml = viewSavings(key);
   else if(curView==='debts') viewHtml = viewDebts(key);
+  else if(curView==='accounts') viewHtml = viewAccounts(key);
   else if(curView==='calendar') viewHtml = viewCalendar(key);
   else if(curView==='annual') viewHtml = viewAnnual(curYearForAnnual);
   else if(curView==='settings') viewHtml = viewSettings();
@@ -1949,7 +1955,10 @@ function viewDashboard(key){
             <div class="hero-note">after spending &amp; saving</div>
           </div>
         </div>
-        ${(()=>{ const o = lentTotals().outstanding; return o>0 ? `<button class="hero-owed" data-action="goto-lent">${icon('hand-coins','ic-sm')}${money(o)} owed to you${icon('chevron-right','ic-sm')}</button>` : ''; })()}
+        <div class="hero-links">
+          ${activeAccounts().length ? `<button class="hero-owed hero-net" data-action="goto" data-view="accounts" title="Total of accounts included in your net balance">${icon('scale','ic-sm')}Net balance ${money(accountTotals().net)}${icon('chevron-right','ic-sm')}</button>` : ''}
+          ${(()=>{ const o = lentTotals().outstanding; return o>0 ? `<button class="hero-owed" data-action="goto-lent">${icon('hand-coins','ic-sm')}${money(o)} owed to you${icon('chevron-right','ic-sm')}</button>` : ''; })()}
+        </div>
       </div>
     </section>
 
@@ -2897,6 +2906,238 @@ function debtStatusPill(d){
   if(s==='Flexible') return statusPill('flexible');
   return statusPill('ontrack');
 }
+/* =========================================================
+   ACCOUNTS — wallets, banks and savings accounts
+   Each account starts from an opening balance on a date. After that, anything tagged with the
+   account moves its balance: income in, expenses out, money borrowed in, debt payments out,
+   money lent out, repayments in, transfers between accounts, and balance adjustments.
+   Opening balances, transfers and adjustments are never income or expenses, so budgets don't move.
+========================================================= */
+function accountsList(){ return state.accounts || (state.accounts = []); }
+function accountById(id){ return accountsList().find(a=>a.id===id) || null; }
+function activeAccounts(){ return accountsList().filter(a=>!a.archived); }
+function accountName(id){ const a = accountById(id); return a ? a.name : 'Unknown account'; }
+function accountIcon(name, type){
+  const n = name||'';
+  if(/mp2|pag-?ibig|invest|stock|fund|uitf|time deposit|crypto/i.test(n)) return 'trending-up';
+  if(/gcash|maya|paymaya|wallet app|e-?wallet|grabpay|shopeepay/i.test(n)) return 'smartphone';
+  if(/cash|petty|coin/i.test(n)) return 'wallet';
+  if(/bank|bpi|bdo|metro|maribank|landbank|unionbank|security|rcbc|pnb|chinabank|eastwest|gotyme|tonik|seabank|cimb|ing/i.test(n)) return 'landmark';
+  if(type==='savings' || /sav/i.test(n)) return 'piggy-bank';
+  return 'wallet';
+}
+function accountMovements(acc){
+  const out = [];
+  const from = acc.openingDate || '0000-00-00';
+  const add = (date, amount, label, kind, ref)=>{ if(date && date >= from && amount) out.push({date, amount:Number(amount), label, kind, ref:ref||{}}); };
+  Object.entries(state.months).forEach(([k, m])=>{
+    (m.income||[]).forEach(i=>{ if(i.accountId===acc.id) add(i.date, +i.amount, i.description || `${earnerName(i.person)} income`, 'income', {month:k, view:'income'}); });
+    allBuckets().forEach(b=> ((m[b.id]||{}).expenses||[]).forEach(e=>{ if(e.accountId===acc.id) add(e.date, -e.amount, e.description || expenseLeafLabel(e), 'expense', {month:k, view:b.id}); }));
+  });
+  Object.entries(state.months).forEach(([k, m])=>{
+    Object.entries(m.savingsDeposits||{}).forEach(([gid, list])=>{
+      const g = state.settings.savingsGoals.find(x=>x.id===gid); const gname = g ? g.name : 'savings';
+      (list||[]).forEach(d=>{
+        if(d.from===acc.id) add(d.date, -d.amount, `Saved to ${gname}`, 'saving', {month:k, view:'savings'});
+        if(d.to===acc.id) add(d.date, +d.amount, `Savings · ${gname}`, 'saving', {month:k, view:'savings'});
+      });
+    });
+  });
+  state.debts.forEach(d=>{
+    if(d.accountId===acc.id) add(d.dateBorrowed, +d.principal, `Borrowed from ${d.lender}`, 'borrowed', {debt:d.id});
+    d.payments.forEach(p=>{ if(p.accountId===acc.id) add(p.date, -p.amount, `Payment to ${d.lender}`, 'debtpay', {debt:d.id}); });
+  });
+  loansGiven().forEach(l=>{
+    if(l.accountId===acc.id) add(l.dateBorrowed, -l.principal, `Lent to ${l.lender}`, 'lent', {debt:l.id});
+    l.payments.forEach(p=>{ if(p.accountId===acc.id) add(p.date, +p.amount, `Repaid by ${l.lender}`, 'repaid', {debt:l.id}); });
+  });
+  (state.transfers||[]).forEach(t=>{
+    if(t.from===acc.id){ add(t.date, -t.amount, `Transfer to ${accountName(t.to)}`, 'transfer', {transfer:t.id}); if(Number(t.fee)) add(t.date, -t.fee, 'Transfer fee', 'fee', {transfer:t.id}); }
+    if(t.to===acc.id) add(t.date, +t.amount, `Transfer from ${accountName(t.from)}`, 'transfer', {transfer:t.id});
+  });
+  (state.adjustments||[]).forEach(x=>{ if(x.accountId===acc.id) add(x.date, +x.amount, x.note || 'Balance adjustment', 'adjust', {adjust:x.id}); });
+  return out.sort((a,b)=> b.date.localeCompare(a.date));
+}
+function accountBalance(acc){ return (Number(acc.openingBalance)||0) + sumBy(accountMovements(acc), x=>x.amount); }
+/* Net balance counts only accounts with "Include in net balance" on. Spendable = spending accounts within that. */
+function accountTotals(){
+  let net = 0, spend = 0, saved = 0;
+  activeAccounts().forEach(a=>{
+    if(!a.includeInNet) return;
+    const b = accountBalance(a); net += b;
+    if(a.type==='savings') saved += b; else spend += b;
+  });
+  return {net, spend, saved};
+}
+/* Account picker for entry forms. Pre-fills your default account on new entries; "Not tracked" leaves it off. */
+function accountFieldHtml(current, label){
+  if(!accountsList().length) return '';
+  const sel = current===undefined ? (state.settings.defaultAccountId || '') : (current || '');
+  const list = accountsList().filter(a=>!a.archived || a.id===sel);
+  return `<div class="field"><label>${label||'Account'}</label>
+    <select id="f-account"><option value="">Not tracked</option>${list.map(a=>`<option value="${a.id}" ${sel===a.id?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>`;
+}
+function readAccountField(){ const el = document.getElementById('f-account'); return el ? (el.value || null) : undefined; }
+
+function accountCard(a){
+  const bal = accountBalance(a);
+  const isDefault = state.settings.defaultAccountId===a.id;
+  return `<div class="card account-card ${a.archived?'archived':''}" data-action="view-account" data-id="${a.id}">
+    <div class="account-top">
+      <span class="badge-ic t-${a.type==='savings'?'save':'nec'}">${icon(a.icon || accountIcon(a.name, a.type))}</span>
+      <span class="account-name"><b>${escapeHtml(a.name)}</b><small>${a.type==='savings'?'Savings & investments':'Spending'}</small></span>
+      ${kebab('account', {id:a.id})}
+    </div>
+    <div class="account-bal ${bal<0?'neg':''}">${money(bal)}</div>
+    <div class="account-tags">${isDefault?'<span class="pill sage">Default</span>':''}${a.includeInNet?'':'<span class="pill muted">Not in net balance</span>'}${a.archived?'<span class="pill muted">Archived</span>':''}</div>
+  </div>`;
+}
+function viewAccounts(key){
+  if(curAccountId){ const a = accountById(curAccountId); if(a) return accountDetailView(a); curAccountId = null; }
+  const t = accountTotals();
+  const list = activeAccounts(), archived = accountsList().filter(a=>a.archived);
+  const moves = (state.transfers||[]).map(x=>({...x, kind:'transfer'})).concat((state.adjustments||[]).map(x=>({...x, kind:'adjust'}))).sort((a,b)=>b.date.localeCompare(a.date));
+  return `
+    ${pageHead('Accounts', 'Your wallets, banks and savings accounts', `${list.length>1?`<button class="btn" data-action="add-transfer">${icon('arrow-left-right','ic-sm')}Transfer</button>`:''}<button class="btn btn-primary" data-action="add-account">${icon('plus','ic-sm')}Add Account</button>`)}
+    ${list.length ? `<div class="kpi-row">
+      ${kpiCard('Net Balance', 'scale', 'nec', t.net, null)}
+      ${kpiCard('Spendable', 'wallet', 'extra', t.spend, null)}
+      ${kpiCard('Savings & Investments', 'piggy-bank', 'sky', t.saved, null)}
+    </div>
+    <div class="account-grid">${list.map(accountCard).join('')}</div>`
+    : `<div class="card">${doodleNote('lantern', 'Add your first account', 'Add where your money lives — Cash, BPI, MariBank, Pag-IBIG MP2 — with its balance today. Then pick an account when you add income or expenses, and its balance updates by itself.')}</div>`}
+    ${moves.length ? `<div class="card" style="margin-top:18px;">
+      <div class="card-head"><h3 class="card-title">Transfers & Adjustments</h3><span class="card-chip">${moves.length}</span></div>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Date</th><th>What</th><th class="num">Amount</th><th>Note</th><th style="width:40px;"></th></tr></thead>
+        <tbody>${moves.map(x=>`<tr>
+          <td class="nowrap">${fmtDateLong(x.date)}</td>
+          <td>${x.kind==='transfer' ? `<span class="cat-name"><span class="badge-ic xs t-save">${icon('arrow-left-right')}</span>${escapeHtml(accountName(x.from))} → ${escapeHtml(accountName(x.to))}</span>` : `<span class="cat-name"><span class="badge-ic xs t-extra">${icon('scale')}</span>Adjusted ${escapeHtml(accountName(x.accountId))}</span>`}</td>
+          <td class="num"><b>${money(x.kind==='transfer' ? x.amount : x.amount)}</b>${x.kind==='transfer' && Number(x.fee) ? `<small class="muted-cell"> + ${money(x.fee)} fee</small>` : ''}</td>
+          <td class="muted-cell">${escapeHtml(x.note||'')}</td>
+          <td>${kebab(x.kind==='transfer'?'transfer':'adjust', {id:x.id})}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </div>` : ''}
+    ${archived.length ? `<details class="card" style="margin-top:18px;"><summary class="section-title" style="margin:0;cursor:pointer;">Archived accounts (${archived.length})</summary><div class="account-grid" style="margin-top:14px;">${archived.map(accountCard).join('')}</div></details>` : ''}
+    <p class="help-text" style="margin-top:12px;">Opening balances, transfers and adjustments aren’t income or expenses, so they never change your budget. Savings goals are tracked separately on the Savings page.</p>
+  `;
+}
+function accountDetailView(a){
+  const moves = accountMovements(a);
+  const bal = accountBalance(a);
+  return `
+    <button class="btn btn-ghost btn-sm" data-action="back-to-accounts" style="margin-top:8px;">${icon('arrow-left','ic-sm')}Back to Accounts</button>
+    ${pageHead(escapeHtml(a.name), `${a.type==='savings'?'Savings & investments':'Spending account'}${a.includeInNet?'':' · not in net balance'}`,
+      `<button class="btn" data-action="edit-account" data-id="${a.id}">${icon('pencil','ic-sm')}Edit</button>
+       <button class="btn" data-action="adjust-account" data-id="${a.id}">${icon('scale','ic-sm')}Adjust Balance</button>
+       ${activeAccounts().length>1?`<button class="btn btn-primary" data-action="add-transfer" data-from="${a.id}">${icon('arrow-left-right','ic-sm')}Transfer</button>`:''}`)}
+    <div class="kpi-row">
+      ${kpiCard('Balance', 'wallet', bal<0?'rose':'nec', bal, null)}
+      ${kpiCard('Opening Balance', 'flag', 'extra', Number(a.openingBalance)||0, null, null, null)}
+      ${kpiCard('Money In', 'arrow-down-left', 'sky', sumBy(moves.filter(x=>x.amount>0), x=>x.amount), null)}
+      ${kpiCard('Money Out', 'arrow-up-right', 'rose', -sumBy(moves.filter(x=>x.amount<0), x=>x.amount), null)}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3 class="card-title">Activity</h3><span class="card-chip">Since ${fmtDateLong(a.openingDate)}</span></div>
+      ${moves.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th></tr></thead>
+        <tbody>${moves.map(x=>`<tr>
+          <td class="nowrap">${fmtDateLong(x.date)}</td>
+          <td>${escapeHtml(x.label)}</td>
+          <td class="num"><b class="${x.amount<0?'':'pos'}">${x.amount<0?'−':'+'}${money(Math.abs(x.amount))}</b></td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : emptyNote('wallet','nec', 'Nothing recorded in this account yet. Choose it in the Account field when you add income, an expense or a debt payment.')}
+    </div>
+  `;
+}
+function openAccountModal(id){
+  const existing = id ? accountById(id) : null;
+  const a = existing || {name:'', type:'spending', icon:'', openingBalance:'', openingDate:toISO(today), includeInNet:true};
+  const body = `
+    <div class="field"><label>Name</label><input type="text" id="f-aname" value="${escapeHtml(a.name)}" placeholder="e.g. Cash, BPI, MariBank, Pag-IBIG MP2" maxlength="40"></div>
+    <div class="field"><label>Type</label>
+      <select id="f-atype">
+        <option value="spending" ${a.type!=='savings'?'selected':''}>Spending — cash, bank, e-wallet</option>
+        <option value="savings" ${a.type==='savings'?'selected':''}>Savings & investments — money set aside (e.g. MP2)</option>
+      </select></div>
+    ${iconFieldHtml('f-aicon', a.icon, 'Icon', {tone:'nec', nameSrc:'f-aname', autoIcon:accountIcon(a.name, a.type)})}
+    <div class="field-row">
+      <div class="field"><label>Balance on that date (${currencySymbol()})</label><input type="number" id="f-aopen" step="0.01" value="${a.openingBalance}" placeholder="0.00"></div>
+      <div class="field"><label>As of</label><input type="date" id="f-adate" value="${a.openingDate}"></div>
+    </div>
+    <p class="help-text" style="margin-top:-6px;">This is your starting balance, not new income. Anything you record in this account from this date on moves the balance.</p>
+    <label class="toggle-row"><input type="checkbox" id="f-anet" ${a.includeInNet?'checked':''}><span><b>Include in net balance</b><small>Turn off to keep it in your list without counting it in the dashboard’s net balance. Doesn’t change income or budgets.</small></span></label>
+    <label class="toggle-row"><input type="checkbox" id="f-adef" ${state.settings.defaultAccountId===(existing&&existing.id) || (!existing && !accountsList().length)?'checked':''}><span><b>Default account</b><small>Pre-selected when you add income or expenses.</small></span></label>`;
+  openModal(existing ? 'Edit account' : 'Add account', body, ()=>{
+    const name = document.getElementById('f-aname').value.trim();
+    const openingDate = document.getElementById('f-adate').value;
+    if(!name || !openingDate){ showFormError('Enter a name and the date of the balance.'); return false; }
+    const type = document.getElementById('f-atype').value;
+    const fields = {name, type, icon:document.getElementById('f-aicon').value || accountIcon(name, type),
+      openingBalance:Number(document.getElementById('f-aopen').value)||0, openingDate, includeInNet:document.getElementById('f-anet').checked};
+    let acc = existing;
+    if(acc) Object.assign(acc, fields);
+    else { acc = Object.assign({id:uid('acct'), archived:false}, fields); accountsList().push(acc); }
+    if(document.getElementById('f-adef').checked) state.settings.defaultAccountId = acc.id;
+    else if(state.settings.defaultAccountId===acc.id) state.settings.defaultAccountId = null;
+    saveState(); renderAll(); toast(existing ? 'Account updated' : `${name} added`); return true;
+  }, {submitLabel:'Save'});
+}
+function openTransferModal(id, fromId){
+  const existing = id ? (state.transfers||[]).find(t=>t.id===id) : null;
+  const list = activeAccounts();
+  const t = existing || {date:toISO(today), from:fromId || state.settings.defaultAccountId || (list[0]||{}).id, to:'', amount:'', fee:'', note:''};
+  const opts = (sel)=> list.map(a=>`<option value="${a.id}" ${sel===a.id?'selected':''}>${escapeHtml(a.name)}</option>`).join('');
+  const body = `
+    <div class="field-row">
+      <div class="field"><label>From</label><select id="f-tfrom">${opts(t.from)}</select></div>
+      <div class="field"><label>To</label><select id="f-tto">${opts(t.to || (list.find(a=>a.id!==t.from)||{}).id)}</select></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Amount (${currencySymbol()})</label><input type="number" id="f-tamt" step="0.01" min="0" value="${t.amount}" placeholder="0.00"></div>
+      <div class="field"><label>Fee (optional)</label><input type="number" id="f-tfee" step="0.01" min="0" value="${t.fee||''}" placeholder="0.00"></div>
+    </div>
+    <div class="field"><label>Date</label><input type="date" id="f-tdate" value="${t.date}"></div>
+    <div class="field"><label>Note (optional)</label><input type="text" id="f-tnote" value="${escapeHtml(t.note||'')}" placeholder="e.g. Monthly MP2 contribution"></div>
+    <p class="help-text">A transfer isn’t income or an expense. Any fee comes out of the “From” account.</p>`;
+  openModal(existing ? 'Edit transfer' : 'Transfer between accounts', body, ()=>{
+    const from = document.getElementById('f-tfrom').value, to = document.getElementById('f-tto').value;
+    const amount = Number(document.getElementById('f-tamt').value), fee = Number(document.getElementById('f-tfee').value)||0;
+    const date = document.getElementById('f-tdate').value;
+    if(!from || !to || from===to){ showFormError('Pick two different accounts.'); return false; }
+    if(!amount || amount<=0 || !date){ showFormError('Enter an amount and date.'); return false; }
+    const rec = {from, to, amount, fee, date, note:document.getElementById('f-tnote').value.trim()};
+    if(existing) Object.assign(existing, rec);
+    else (state.transfers || (state.transfers = [])).push(Object.assign({id:uid('xfer')}, rec));
+    saveState(); renderAll(); toast('Transfer saved'); return true;
+  }, {submitLabel:'Save'});
+}
+/* Reconcile: type the real balance; the difference is saved as an adjustment (not income or spending). */
+function openAdjustModal(accountId, adjustId){
+  const existing = adjustId ? (state.adjustments||[]).find(x=>x.id===adjustId) : null;
+  const a = accountById(existing ? existing.accountId : accountId); if(!a) return;
+  const current = accountBalance(a) - (existing ? existing.amount : 0);
+  const body = `
+    <p class="small-muted">${escapeHtml(a.name)} shows <strong style="color:var(--ink);">${money(current)}</strong>${existing?' without this adjustment':''}. Enter what it really has; the difference is saved as an adjustment, not income or spending.</p>
+    <div class="field"><label>Actual balance (${currencySymbol()})</label><input type="number" id="f-xbal" step="0.01" value="${existing ? Math.round((current+existing.amount)*100)/100 : ''}" placeholder="${Math.round(current*100)/100}"></div>
+    <div class="field"><label>Date</label><input type="date" id="f-xdate" value="${existing ? existing.date : toISO(today)}"></div>
+    <div class="field"><label>Note (optional)</label><input type="text" id="f-xnote" value="${escapeHtml(existing ? existing.note||'' : '')}" placeholder="e.g. Interest earned, forgot to log"></div>`;
+  openModal(existing ? 'Edit adjustment' : 'Adjust balance', body, ()=>{
+    const v = document.getElementById('f-xbal').value;
+    const date = document.getElementById('f-xdate').value;
+    if(v==='' || !date){ showFormError('Enter the actual balance and a date.'); return false; }
+    const amount = Math.round((Number(v) - current)*100)/100;
+    const note = document.getElementById('f-xnote').value.trim();
+    if(existing) Object.assign(existing, {amount, date, note});
+    else if(amount!==0) (state.adjustments || (state.adjustments = [])).push({id:uid('adj'), accountId:a.id, amount, date, note});
+    saveState(); renderAll(); toast(amount===0 ? 'Balance already matches' : 'Balance adjusted'); return true;
+  }, {submitLabel:'Save'});
+}
+function accountHasRecords(a){
+  return accountMovements(Object.assign({}, a, {openingDate:'0000-00-00'})).length > 0;
+}
+
 function debtSideTabs(){
   const tabs = [{id:'owe', label:'I owe', ic:'landmark', tone:'debt'}, {id:'lent', label:'Owed to me', ic:'hand-coins', tone:'save'}];
   return `<div class="section-tabs" role="tablist">${tabs.map(t=>`<button role="tab" aria-selected="${curDebtSide===t.id}" class="${curDebtSide===t.id?'active':''}" data-action="set-debt-side" data-side="${t.id}"><span class="badge-ic t-${t.tone}">${icon(t.ic)}</span>${t.label}</button>`).join('')}</div>`;
@@ -3951,6 +4192,35 @@ function handleAction(action, el, key){
   if(action==='decide-rollover') return openRolloverModal(el.dataset.monthkey, el.dataset.section);
 
   if(action==='goto-lent'){ curDebtSide = 'lent'; navTo('debts'); return; }
+  if(action==='add-account') return openAccountModal(null);
+  if(action==='edit-account') return openAccountModal(el.dataset.id);
+  if(action==='view-account'){ curAccountId = el.dataset.id; if(curView!=='accounts'){ curView = 'accounts'; } renderAll(); window.scrollTo({top:0}); return; }
+  if(action==='back-to-accounts'){ curAccountId = null; renderAll(); return; }
+  if(action==='add-transfer') return openTransferModal(null, el.dataset.from);
+  if(action==='edit-transfer') return openTransferModal(el.dataset.id);
+  if(action==='delete-transfer'){
+    const list = state.transfers||[]; const idx = list.findIndex(x=>x.id===el.dataset.id); if(idx<0) return;
+    const item = list[idx]; return deleteWithUndo('Transfer deleted', ()=>list.splice(idx,1), ()=>list.splice(idx,0,item));
+  }
+  if(action==='adjust-account') return openAdjustModal(el.dataset.id, null);
+  if(action==='edit-adjust') return openAdjustModal(null, el.dataset.id);
+  if(action==='delete-adjust'){
+    const list = state.adjustments||[]; const idx = list.findIndex(x=>x.id===el.dataset.id); if(idx<0) return;
+    const item = list[idx]; return deleteWithUndo('Adjustment deleted', ()=>list.splice(idx,1), ()=>list.splice(idx,0,item));
+  }
+  if(action==='default-account'){ state.settings.defaultAccountId = el.dataset.id; saveState(); renderAll(); toast(`${accountName(el.dataset.id)} is now your default`); return; }
+  if(action==='restore-account'){ const a = accountById(el.dataset.id); if(a){ a.archived = false; saveState(); renderAll(); } return; }
+  if(action==='delete-account'){
+    const a = accountById(el.dataset.id); if(!a) return;
+    if(accountHasRecords(a)){
+      return confirmModal(`${a.name} has entries recorded in it, so it will be archived instead of deleted: hidden from your lists and totals, with its history kept. Archive it?`, ()=>{
+        a.archived = true; if(state.settings.defaultAccountId===a.id) state.settings.defaultAccountId = null; curAccountId = null; saveState(); renderAll();
+      });
+    }
+    return confirmModal(`Delete ${a.name}? Nothing is recorded in it.`, ()=>{
+      state.accounts = accountsList().filter(x=>x.id!==a.id); if(state.settings.defaultAccountId===a.id) state.settings.defaultAccountId = null; curAccountId = null; saveState(); renderAll();
+    });
+  }
   if(action==='set-debt-side'){ curDebtSide = el.dataset.side; curDebtDetailId = null; renderAll(); return; }
   if(action==='add-debt') return openDebtModal(null, 'owe');
   if(action==='add-lent') return openDebtModal(null, 'lent');
@@ -4104,6 +4374,18 @@ function rowMenuItems(ds, key){
     case 'income': return [edit('edit-income'), del('delete-income')];
     case 'expense': return [edit('edit-expense'), del('delete-expense')];
     case 'payment': return [edit('edit-debt-payment'), del('delete-debt-payment')];
+    case 'transfer': return [edit('edit-transfer'), del('delete-transfer')];
+    case 'adjust': return [edit('edit-adjust'), del('delete-adjust')];
+    case 'account': {
+      const a = accountById(ds.id) || {};
+      const items = [{label:'View activity', icon:'list', onClick:run('view-account')}];
+      if(!a.archived && activeAccounts().length>1) items.push({label:'Transfer from here', icon:'arrow-left-right', tone:'c-nec', onClick:run('add-transfer', {from:ds.id})});
+      if(!a.archived) items.push({label:'Adjust balance', icon:'scale', onClick:run('adjust-account')});
+      if(!a.archived && state.settings.defaultAccountId!==a.id) items.push({label:'Make default', icon:'star', onClick:run('default-account')});
+      items.push(edit('edit-account'));
+      items.push(a.archived ? {label:'Restore', icon:'undo-2', onClick:run('restore-account')} : {label:'Archive or delete', icon:'archive', tone:'danger', onClick:run('delete-account')});
+      return items;
+    }
     case 'earner': return [edit('edit-earner'), {label:'Remove', icon:'trash-2', tone:'danger', onClick:run('delete-earner')}];
     case 'debt': return [
       {label: findLoan(ds.id).side==='lent' ? 'Record repayment' : 'Record payment', icon:'hand-coins', tone:'c-nec', onClick:run('record-debt-payment')},
@@ -4112,7 +4394,7 @@ function rowMenuItems(ds, key){
     case 'goal': {
       const g = state.settings.savingsGoals.find(x=>x.id===ds.id) || {};
       return [
-        {label:'Record savings', icon:'hand-coins', tone:'c-nec', onClick:run('record-savings')},
+        {label:'Add savings', icon:'hand-coins', tone:'c-nec', onClick:run('record-savings')},
         {label:'Change this month’s %', icon:'percent', onClick:run('edit-goal-alloc')},
         edit('edit-goal'),
         {label:g.active?'Hide goal':'Show goal', icon:g.active?'eye-off':'eye', onClick:run('toggle-goal-active')},
@@ -4365,6 +4647,7 @@ function openIncomeModal(key, id, prefill){
     <div class="field"><label>Date received</label><input type="date" id="f-date" value="${existing?existing.date:(prefill.date||toISO(today))}"></div>
     <div class="field"><label>Amount (${currencySymbol()})</label><input type="number" id="f-amount" step="0.01" min="0" value="${existing?existing.amount:(prefill.amount||'')}" placeholder="0.00"></div>
     <div class="field"><label>Source (optional)</label><input type="text" id="f-desc" value="${escapeHtml(existing?(existing.description||''):(prefill.description||''))}" placeholder="Salary"></div>
+    ${accountFieldHtml(existing ? (existing.accountId||'') : undefined, 'Received into')}
     <div id="f-error" class="warn-text" style="display:none;"></div>
   `;
   openModal(existing?'Edit income':(prefill.title||'Add income'), body, ()=>{
@@ -4373,11 +4656,13 @@ function openIncomeModal(key, id, prefill){
     const amount = Number(document.getElementById('f-amount').value);
     const description = document.getElementById('f-desc').value;
     if(!date || !amount || amount<=0){ showFormError('Enter a valid date and amount.'); return false; }
-    if(existing){ Object.assign(existing, {date, person:personV, amount, description}); }
+    const accountId = readAccountField();
+    if(existing){ Object.assign(existing, {date, person:personV, amount, description}); if(accountId!==undefined) existing.accountId = accountId; }
     else {
       // File new income under the month it was received in.
       const target = getMonth(date.slice(0,7), true);
       const rec = {id:uid('inc'), date, person:personV, amount, description};
+      if(accountId) rec.accountId = accountId;
       if(prefill.recurringIncomeId){ rec.recurringIncomeId = prefill.recurringIncomeId; rec.recurringDueDate = prefill.recurringDueDate; }
       target.income.push(rec);
     }
@@ -4710,6 +4995,7 @@ function openExpenseModal(key, sec, id, prefill){
     </div>
     <div class="field"><label>Description</label><input type="text" id="f-desc" value="${existing?escapeHtml(existing.description||''):escapeHtml(prefill.description||'')}" placeholder="e.g. Weekly groceries"></div>
     <div class="field"><label>Amount (${currencySymbol()})</label><input type="number" id="f-amount" step="0.01" min="0" value="${existing?existing.amount:(prefill.amount!==undefined?prefill.amount:'')}" placeholder="0.00"></div>
+    ${accountFieldHtml(existing ? (existing.accountId||'') : undefined, 'Paid from')}
   `;
   openModal((existing?'Edit expense':(prefill.recurringId?'Record payment':'Add expense'))+` <span style="font-weight:500;color:var(--text-3);font-size:15px;">· ${sectionLabel(sec)}</span>`, body, ()=>{
     const date = document.getElementById('f-date').value;
@@ -4721,9 +5007,11 @@ function openExpenseModal(key, sec, id, prefill){
     if(!date || !amount || amount<=0){ showFormError('Enter a valid date and amount.'); return false; }
     const before = budgetSnapshot(key, sec, mainCategory);
     setTimeout(()=>budgetCrossingToast(key, sec, mainCategory, before), 0);
-    if(existing){ existing.date=date; existing.mainCategory=mainCategory; existing.subCategory=subCategory; existing.description=description; existing.amount=amount; }
+    const accountId = readAccountField();
+    if(existing){ existing.date=date; existing.mainCategory=mainCategory; existing.subCategory=subCategory; existing.description=description; existing.amount=amount; if(accountId!==undefined) existing.accountId = accountId; }
     else{
       const rec = {id:uid('exp'), date, mainCategory, subCategory, description, amount};
+      if(accountId) rec.accountId = accountId;
       if(prefill.recurringId){
         rec.recurringId = prefill.recurringId; rec.recurringDueDate = prefill.recurringDueDate;
       } else {
@@ -5087,18 +5375,74 @@ function openGoalModal(id){
     saveState(); renderAll(); return true;
   });
 }
-function openRecordSavingsModal(key, goalId){
+/* Savings deposits. Each one keeps its own date and accounts; the goal's monthly total
+   (savingsActuals) stays the sum, so budgets read savings exactly as before. Older months may
+   have a total recorded before deposits existed — that part just has no accounts. */
+function savingsDeposits(m, goalId){
+  if(!m.savingsDeposits) m.savingsDeposits = {};
+  return m.savingsDeposits[goalId] || (m.savingsDeposits[goalId] = []);
+}
+function openRecordSavingsModal(key, goalId, depositId){
   const m = getMonth(key,true);
   const goal = state.settings.savingsGoals.find(g=>g.id===goalId);
+  if(!goal) return;
+  const deposits = savingsDeposits(m, goalId);
+  const existing = depositId ? deposits.find(d=>d.id===depositId) : null;
+  const total = Number(m.savingsActuals[goalId]||0);
+  const earlier = Math.max(0, total - sumBy(deposits, d=>d.amount));
+  const [mStart, mEnd] = monthRange(key);
+  const defDate = (toISO(today) >= mStart && toISO(today) <= mEnd) ? toISO(today) : mEnd;
+  const accountSelect = (id, label, current, hint)=> accountsList().length ? `<div class="field"><label>${label}</label>
+      <select id="${id}"><option value="">Not tracked</option>${accountsList().filter(a=>!a.archived || a.id===current).map(a=>`<option value="${a.id}" ${current===a.id?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select>
+      ${hint?`<div class="help-text">${hint}</div>`:''}</div>` : '';
+  const list = deposits.length || earlier ? `<div class="dep-list">
+      ${earlier ? `<div class="dep-row"><span>Recorded earlier</span><span class="muted-cell">no account</span><b>${money(earlier)}</b><span class="dep-actions"><button type="button" class="icon-btn" data-dep-del="__earlier" aria-label="Remove">${icon('trash-2','ic-sm')}</button></span></div>` : ''}
+      ${deposits.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(d=>`<div class="dep-row ${existing&&existing.id===d.id?'editing':''}">
+        <span>${fmtDateHuman(d.date)}</span>
+        <span class="muted-cell">${d.from?escapeHtml(accountName(d.from)):'—'} → ${d.to?escapeHtml(accountName(d.to)):'—'}</span>
+        <b>${money(d.amount)}</b>
+        <span class="dep-actions"><button type="button" class="icon-btn" data-dep-edit="${d.id}" aria-label="Edit">${icon('pencil','ic-sm')}</button><button type="button" class="icon-btn" data-dep-del="${d.id}" aria-label="Delete">${icon('trash-2','ic-sm')}</button></span>
+      </div>`).join('')}
+      <div class="dep-row dep-total"><span>Saved this month</span><span></span><b>${money(total)}</b></div>
+    </div>` : '';
   const body = `
-    <div class="field"><label>Actual saved toward "${escapeHtml(goal.name)}" this month (${currencySymbol()})</label>
-    <input type="number" id="f-amount" min="0" step="0.01" value="${m.savingsActuals[goalId]||''}" placeholder="0.00"></div>
+    ${list}
+    <div class="field-row">
+      <div class="field"><label>${existing?'Amount':'Add amount'} (${currencySymbol()})</label><input type="number" id="f-amount" min="0" step="0.01" value="${existing?existing.amount:''}" placeholder="0.00"></div>
+      <div class="field"><label>Date</label><input type="date" id="f-date" value="${existing?existing.date:defDate}" min="${mStart}" max="${mEnd}"></div>
+    </div>
+    ${accountSelect('f-from', 'Taken from', existing ? (existing.from||'') : (state.settings.defaultAccountId||''), 'The wallet or account the money left.')}
+    ${accountSelect('f-to', 'Saved into', existing ? (existing.to||'') : '', 'Where this savings now lives, e.g. Pag-IBIG MP2.')}
+    ${accountsList().length ? '' : '<p class="help-text">Tip: add your accounts on the Accounts page to choose where each deposit comes from and goes.</p>'}
   `;
-  openModal('Record savings', body, ()=>{
+  openModal(existing ? `Edit savings · ${escapeHtml(goal.name)}` : `Add savings · ${escapeHtml(goal.name)}`, body, ()=>{
     const amount = Number(document.getElementById('f-amount').value)||0;
-    m.savingsActuals[goalId] = amount;
-    saveState(); renderAll(); return true;
-  });
+    const date = document.getElementById('f-date').value;
+    if(amount<=0 || !date){ showFormError('Enter an amount and a date in this month.'); return false; }
+    if(date < mStart || date > mEnd){ showFormError(`Pick a date in ${MONTH_NAMES[cur_moOf(key)]}.`); return false; }
+    const from = (document.getElementById('f-from')||{}).value || null;
+    const to = (document.getElementById('f-to')||{}).value || null;
+    if(from && to && from===to){ showFormError('“Taken from” and “Saved into” are the same account.'); return false; }
+    if(existing){
+      m.savingsActuals[goalId] = total - existing.amount + amount;
+      Object.assign(existing, {amount, date, from, to});
+    } else {
+      deposits.push({id:uid('dep'), amount, date, from, to});
+      m.savingsActuals[goalId] = total + amount;
+    }
+    saveState(); renderAll(); toast(existing ? 'Savings updated' : `${money(amount)} saved to ${goal.name}`); return true;
+  }, {submitLabel: existing ? 'Save' : 'Add savings'});
+  const body_ = document.getElementById('modalBody');
+  body_.querySelectorAll('[data-dep-edit]').forEach(b=> b.addEventListener('click', ()=>{ closeModal(); openRecordSavingsModal(key, goalId, b.dataset.depEdit); }));
+  body_.querySelectorAll('[data-dep-del]').forEach(b=> b.addEventListener('click', ()=>{
+    if(b.dataset.depDel==='__earlier'){ m.savingsActuals[goalId] = sumBy(deposits, d=>d.amount); saveState(); renderAll(); closeModal(); openRecordSavingsModal(key, goalId); toast('Earlier amount removed'); return; }
+    const idx = deposits.findIndex(d=>d.id===b.dataset.depDel); if(idx<0) return;
+    const d = deposits[idx];
+    deposits.splice(idx,1);
+    m.savingsActuals[goalId] = Math.max(0, Number(m.savingsActuals[goalId]||0) - d.amount);
+    saveState(); renderAll(); closeModal(); openRecordSavingsModal(key, goalId);
+    toast('Deposit removed');
+  }));
 }
 
 /* ---------- Modal: Savings target override ---------- */
@@ -5271,6 +5615,7 @@ function openDebtModal(id, side){
       <div class="field"><label>${lent?'Date lent':'Date borrowed'}</label><input type="date" id="f-dateBorrowed" value="${existing?existing.dateBorrowed:toISO(today)}"></div>
     </div>
 
+    ${accountFieldHtml(existing ? (existing.accountId||'') : undefined, lent ? 'Paid from' : 'Received into')}
     <div id="grp-standard">
       <div class="field"><label>Due date (optional)</label><input type="date" id="f-dueDate" value="${existing&&existing.dueDate?existing.dueDate:''}"></div>
       <div class="field"><label>Interest</label>
@@ -5339,6 +5684,7 @@ function openDebtModal(id, side){
     }
     debt.lender = lender; debt.borrower = borrower; debt.repaymentType = repaymentType;
     debt.principal = principal; debt.dateBorrowed = dateBorrowed;
+    { const acc = readAccountField(); if(acc!==undefined) debt.accountId = acc; }
     if(repaymentType==='standard'){
       debt.dueDate = document.getElementById('f-dueDate').value || null;
       const mode = document.getElementById('f-interestMode').value;
@@ -5425,14 +5771,16 @@ function openDebtPaymentModal(debtId, paymentId){
     <div class="field"><label>${lent?'Date received':'Payment date'}</label><input type="date" id="f-date" value="${existing?existing.date:toISO(today)}"></div>
     <div class="field"><label>${lent?'Amount received':'Amount paid'} (${currencySymbol()})</label><input type="number" id="f-amount" min="0" step="0.01" value="${existing?existing.amount:''}"></div>
     <div class="field"><label>Note (optional)</label><input type="text" id="f-note" value="${existing?escapeHtml(existing.note||''):''}" placeholder="e.g. Extra payment"></div>
+    ${accountFieldHtml(existing ? (existing.accountId||'') : undefined, lent ? 'Received into' : 'Paid from')}
   `;
   openModal(lent ? (existing?'Edit repayment':'Record repayment') : (existing?'Edit payment':'Record payment'), body, ()=>{
     const date = document.getElementById('f-date').value;
     const amount = Number(document.getElementById('f-amount').value);
     const note = document.getElementById('f-note').value;
     if(!date || !amount || amount<=0){ showFormError('Enter a valid date and amount.'); return false; }
-    if(existing){ existing.date=date; existing.amount=amount; existing.note=note; }
-    else d.payments.push({id:uid('pay'), date, amount, note});
+    const accountId = readAccountField();
+    if(existing){ existing.date=date; existing.amount=amount; existing.note=note; if(accountId!==undefined) existing.accountId = accountId; }
+    else d.payments.push(Object.assign({id:uid('pay'), date, amount, note}, accountId ? {accountId} : {}));
     saveState(); renderAll(); return true;
   });
 }
