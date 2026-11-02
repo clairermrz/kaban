@@ -1947,14 +1947,8 @@ function viewDashboard(key){
           <div class="hero-big ${calc.netCashFlow<0?'neg':''}">${money(calc.netCashFlow)}</div>
           <div class="hero-note">after spending &amp; saving</div>
         </div>
-        <div class="hero-sub" title="${calc.plan.debtFirst ? 'Income this month minus debt payments — the amount your budget split is based on.' : 'Total income this month — the amount your budget split is based on. Debt payments have their own bucket.'}">
-          <span>Available to budget <b>${money(calc.budgetableIncome)}</b></span>
-          <small>${calc.plan.debtFirst ? 'income after debt payments' : 'total income'}</small>
-        </div>
-        <div class="hero-links">
-          ${activeAccounts().length ? `<button class="hero-owed hero-net" data-action="goto" data-view="accounts" title="Total of accounts included in your net balance">${icon('scale','ic-sm')}Net balance ${money(accountTotals().net)}${icon('chevron-right','ic-sm')}</button>` : ''}
-          ${(()=>{ const o = lentTotals().outstanding; return o>0 ? `<button class="hero-owed" data-action="goto-lent">${icon('hand-coins','ic-sm')}${money(o)} owed to you${icon('chevron-right','ic-sm')}</button>` : ''; })()}
-        </div>
+        ${(()=>{ const why = calc.plan.debtFirst ? 'Your income this month after debt payments. This is the amount your budget is split from.' : 'Your total income this month. This is the amount your budget is split from; debt payments have their own bucket.';
+          return `<button type="button" class="hero-owed hero-budget" data-action="explain" data-title="Available to budget" data-text="${escapeHtml(why)}" title="${escapeHtml(why)}">Available to budget ${money(calc.budgetableIncome)}${icon('info','ic-sm')}</button>`; })()}
       </div>
     </section>
 
@@ -4250,6 +4244,7 @@ function handleAction(action, el, key){
       state.accounts = accountsList().filter(x=>x.id!==a.id); if(state.settings.defaultAccountId===a.id) state.settings.defaultAccountId = null; curAccountId = null; saveState(); renderAll();
     });
   }
+  if(action==='explain') return openMenu(el, [], {html:`<div class="explain-pop"><b>${escapeHtml(el.dataset.title||'')}</b><p>${escapeHtml(el.dataset.text||'')}</p></div>`});
   if(action==='set-debt-side'){ curDebtSide = el.dataset.side; curDebtDetailId = null; renderAll(); return; }
   if(action==='add-debt') return openDebtModal(null, 'owe');
   if(action==='add-lent') return openDebtModal(null, 'lent');

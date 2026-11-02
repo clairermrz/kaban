@@ -1989,3 +1989,29 @@ b.pos{color:var(--success-ink);}
 .dep-actions .icon-btn{width:28px;height:28px;}
 .hero-banner .hero-main .hero-big,.dash-top .hero-banner .hero-main .hero-big{font-size:clamp(28px, 2.4vw, 38px);}
 .hero-banner .hero-sub{display:flex;flex-direction:column;align-items:flex-start;gap:1px;}
+/* Stack "Net balance" and "owed to you" so the Available Cash box stays narrow */
+.hero-banner .hero-links{flex-direction:column;align-items:flex-start;gap:6px;}
+.hero-banner .hero-links .hero-owed{white-space:nowrap;}
+/* Top-row tiles: icon above the text at every desktop width, so labels and amounts get the full tile width */
+@media(min-width:1251px){
+  .dash-top .kpi-tile{flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;padding:16px 18px !important;}
+  .dash-top .kpi-tile .kpi-circle{width:38px;height:38px;}
+  .dash-top .kpi-tile .kpi-circle .ic{width:18px;height:18px;}
+  .dash-top .kpi-tile-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
+  .dash-top .kpi-tile-delta{white-space:nowrap;}
+}
+/* Available Cash a little smaller so the top row stays in proportion */
+.hero-banner .hero-main .hero-big,.dash-top .hero-banner .hero-main .hero-big{font-size:clamp(22px, 1.75vw, 28px);}
+.dash-top .hero-banner .hero-banner-text{gap:8px;}
+.dash-top .hero-banner .hero-sub{padding-top:8px;}
+/* Account cards: same height and aligned, whatever the name length */
+.account-grid{align-items:stretch;}
+.account-grid > .card{margin:0 !important;}
+.account-name small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.account-tags{margin-top:auto;}
+/* "Available to budget" pill + its explanation popover */
+.hero-budget{background:var(--surface-2);border-color:var(--border);color:var(--text-2);margin-top:4px;}
+.hero-budget .ic{opacity:.7;}
+.explain-pop{padding:12px 14px;max-width:280px;}
+.explain-pop b{display:block;font-size:14px;margin-bottom:4px;color:var(--text);}
+.explain-pop p{margin:0;font-size:13px;line-height:1.5;color:var(--text-2);}
