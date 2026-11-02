@@ -1987,3 +1987,5 @@ b.pos{color:var(--success-ink);}
 .dep-total{background:var(--surface-2);font-weight:700;}
 .dep-actions{display:flex;justify-content:flex-end;gap:2px;}
 .dep-actions .icon-btn{width:28px;height:28px;}
+.hero-banner .hero-main .hero-big,.dash-top .hero-banner .hero-main .hero-big{font-size:clamp(28px, 2.4vw, 38px);}
+.hero-banner .hero-sub{display:flex;flex-direction:column;align-items:flex-start;gap:1px;}

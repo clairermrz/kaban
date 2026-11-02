@@ -1942,18 +1942,14 @@ function viewDashboard(key){
     <div class="dash-top">
     <section class="card hero-banner">
       <div class="hero-banner-text">
-        <div class="hero-pair">
-          <div class="hero-fig">
-            <h2 class="hero-fig-title">Available to Budget <span class="info-dot" title="${calc.plan.debtFirst ? 'Income this month minus debt payments — the amount your budget split is based on.' : 'Total income this month — the amount your budget split is based on. Debt payments have their own bucket.'}">${icon('info','ic-sm')}</span></h2>
-            <div class="hero-big">${money(calc.budgetableIncome)}</div>
-            <div class="hero-note">${calc.plan.debtFirst ? 'after debt payments' : 'total income'}</div>
-          </div>
-          <span class="hero-fig-split" aria-hidden="true"></span>
-          <div class="hero-fig">
-            <h2 class="hero-fig-title">Available Cash <span class="info-dot" title="Cash received (income + borrowed) minus expenses, savings, and debt payments.">${icon('info','ic-sm')}</span></h2>
-            <div class="hero-big ${calc.netCashFlow<0?'neg':''}">${money(calc.netCashFlow)}</div>
-            <div class="hero-note">after spending &amp; saving</div>
-          </div>
+        <div class="hero-fig hero-main">
+          <h2 class="hero-fig-title">Available Cash <span class="info-dot" title="Cash received (income + borrowed) minus expenses, savings, and debt payments.">${icon('info','ic-sm')}</span></h2>
+          <div class="hero-big ${calc.netCashFlow<0?'neg':''}">${money(calc.netCashFlow)}</div>
+          <div class="hero-note">after spending &amp; saving</div>
+        </div>
+        <div class="hero-sub" title="${calc.plan.debtFirst ? 'Income this month minus debt payments — the amount your budget split is based on.' : 'Total income this month — the amount your budget split is based on. Debt payments have their own bucket.'}">
+          <span>Available to budget <b>${money(calc.budgetableIncome)}</b></span>
+          <small>${calc.plan.debtFirst ? 'income after debt payments' : 'total income'}</small>
         </div>
         <div class="hero-links">
           ${activeAccounts().length ? `<button class="hero-owed hero-net" data-action="goto" data-view="accounts" title="Total of accounts included in your net balance">${icon('scale','ic-sm')}Net balance ${money(accountTotals().net)}${icon('chevron-right','ic-sm')}</button>` : ''}
