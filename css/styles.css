@@ -2051,3 +2051,7 @@ b.pos{color:var(--success-ink);}
 .explain-pop{padding:12px 14px;max-width:280px;}
 .explain-pop b{display:block;font-size:14px;margin-bottom:4px;color:var(--text);}
 .explain-pop p{margin:0;font-size:13px;line-height:1.5;color:var(--text-2);}
+/* Pencil next to Available Cash */
+.hero-edit{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin-left:auto;border:1px solid var(--border);border-radius:50%;background:var(--surface);color:var(--text-2);cursor:pointer;padding:0;}
+.hero-edit:hover{color:var(--text);border-color:var(--border-strong);}
+.hero-main .hero-fig-title{display:flex;align-items:center;gap:6px;}

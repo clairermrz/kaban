@@ -963,7 +963,8 @@ function computeMonth(key){
     const budget = planAmount(plan, 'debt', budgetableIncome);
     return {budget, actual:debtPaymentsThisMonth, remaining:budget-debtPaymentsThisMonth, share:Number((plan.alloc||{}).debt)||0};
   })();
-  const netCashFlow = totalCashReceived - debtPaymentsThisMonth - totalExpenses - totalActualSavings + lentCashAdjust(mStart, mEnd);
+  const cashAdjust = cashAdjustTotal(m);
+  const netCashFlow = totalCashReceived - debtPaymentsThisMonth - totalExpenses - totalActualSavings + lentCashAdjust(mStart, mEnd) + cashAdjust;
   const savingsRate = totalIncome>0 ? (totalActualSavings/totalIncome*100) : 0;
   const remainingBudgetOverall = sumBy(sectionIds, id=>buckets[id].remaining) + (debtBucket ? debtBucket.remaining : 0);
   // Zero-based: how much of this month's money hasn't been given a job yet.
@@ -974,7 +975,7 @@ function computeMonth(key){
     savings:{budgetTotal:savingsAmount, autoBudgetTotal:savAutoBase, isCustomTarget:hasAmountOverride, actualTotal:totalActualSavings,
       remaining:savingsAmount-totalActualSavings, totalPlanned:totalPlannedAllocation, unallocated:unallocatedAmount,
       goals, goalPctTotal:savingsGoalPctTotal},
-    totalExpenses, netCashFlow, savingsRate, remainingBudgetOverall,
+    totalExpenses, netCashFlow, cashAdjust, savingsRate, remainingBudgetOverall,
     hasPrev: !!prevM, prevKey
   });
 }
@@ -1943,9 +1944,9 @@ function viewDashboard(key){
     <section class="card hero-banner">
       <div class="hero-banner-text">
         <div class="hero-fig hero-main">
-          <h2 class="hero-fig-title">Available Cash <span class="info-dot" title="Cash received (income + borrowed) minus expenses, savings, and debt payments.">${icon('info','ic-sm')}</span></h2>
+          <h2 class="hero-fig-title">Available Cash <span class="info-dot" title="Cash received (income + borrowed) minus expenses, savings, and debt payments.">${icon('info','ic-sm')}</span><button type="button" class="hero-edit" data-action="adjust-cash" title="Edit Available Cash" aria-label="Edit Available Cash">${icon('pencil','ic-sm')}</button></h2>
           <div class="hero-big ${calc.netCashFlow<0?'neg':''}">${money(calc.netCashFlow)}</div>
-          <div class="hero-note">after spending &amp; saving</div>
+          <div class="hero-note">${calc.cashAdjust ? `includes ${calc.cashAdjust>0?'+':'−'}${money(Math.abs(calc.cashAdjust))} adjustment` : 'after spending &amp; saving'}</div>
         </div>
         ${(()=>{ const why = calc.plan.debtFirst ? 'Your income this month after debt payments. This is the amount your budget is split from.' : 'Your total income this month. This is the amount your budget is split from; debt payments have their own bucket.';
           return `<button type="button" class="hero-owed hero-budget" data-action="explain" data-title="Available to budget" data-text="${escapeHtml(why)}" title="${escapeHtml(why)}">Available to budget ${money(calc.budgetableIncome)}${icon('info','ic-sm')}</button>`; })()}
@@ -2552,7 +2553,7 @@ function computeMonthShallowFull(key){
   const savingsActualTotal = sumBy(Object.values(m.savingsActuals), v=>v);
   const debtPaymentsThisMonth = debtPaymentsInRange(mStart, mEnd);
   const borrowedFundsThisMonth = borrowedFundsInRange(mStart, mEnd);
-  const netCashFlow = (totalIncome+borrowedFundsThisMonth) - totalExpenses - savingsActualTotal - debtPaymentsThisMonth + lentCashAdjust(mStart, mEnd);
+  const netCashFlow = (totalIncome+borrowedFundsThisMonth) - totalExpenses - savingsActualTotal - debtPaymentsThisMonth + lentCashAdjust(mStart, mEnd) + cashAdjustTotal(m);
   const savingsRate = totalIncome>0 ? savingsActualTotal/totalIncome*100 : 0;
   return {totalIncome, totalExpenses, actualBy, necActual, extActual, playActual, savingsActualTotal, netCashFlow, savingsRate, debtPaymentsThisMonth, borrowedFundsThisMonth,
     budgetableIncome: incomeBase(plan, totalIncome, debtPaymentsThisMonth),
@@ -3166,6 +3167,44 @@ function checkBeforeOpening(accountIds, date, what){
 /* Tagged entries dated before the opening date (left out of the balance). */
 function accountEarlierEntries(a){
   return accountMovements(Object.assign({}, a, {openingDate:'0000-00-00'})).filter(x=> x.date < (a.openingDate||''));
+}
+/* ---------- Available Cash adjustments ----------
+   Saved per month in m.cashAdjustments. They change Available Cash only: not income, not spending,
+   so budgets and Available to Budget stay the same. */
+function cashAdjustTotal(m){ return sumBy((m && m.cashAdjustments) || [], x=>x.amount); }
+function openCashAdjustModal(key){
+  const m = getMonth(key, true);
+  if(!m.cashAdjustments) m.cashAdjustments = [];
+  const list = m.cashAdjustments;
+  const calc = computeMonth(key);
+  const without = calc.netCashFlow - cashAdjustTotal(m);
+  const [mStart, mEnd] = monthRange(key);
+  const defDate = (toISO(today) >= mStart && toISO(today) <= mEnd) ? toISO(today) : mEnd;
+  const spendAccts = activeAccounts().filter(a=>a.includeInNet && a.type!=='savings');
+  const acctTotal = sumBy(spendAccts, a=>accountBalance(a));
+  const body = `
+    <p class="small-muted">From what you’ve recorded, Available Cash for ${MONTH_NAMES[cur_moOf(key)]} is <strong style="color:var(--ink);">${money(without)}</strong>. Enter what you really have, and the difference is saved as an adjustment. It isn’t income or spending, so your budgets don’t change.</p>
+    ${list.length ? `<div class="dep-list">${list.map(x=>`<div class="dep-row"><span>${fmtDateHuman(x.date)}</span><span class="muted-cell">${escapeHtml(x.note||'Adjustment')}</span><b>${x.amount>0?'+':'−'}${money(Math.abs(x.amount))}</b><span class="dep-actions"><button type="button" class="icon-btn" data-cadj-del="${x.id}" aria-label="Remove">${icon('trash-2','ic-sm')}</button></span></div>`).join('')}
+      <div class="dep-row dep-total"><span>Available Cash now</span><span></span><b>${money(calc.netCashFlow)}</b><span></span></div></div>` : ''}
+    <div class="field"><label>What you really have (${currencySymbol()})</label><input type="number" id="f-cash" step="0.01" placeholder="${Math.round(calc.netCashFlow*100)/100}"></div>
+    ${spendAccts.length ? `<button type="button" class="btn btn-sm" id="f-cash-accts" style="margin:-4px 0 14px;">${icon('wallet','ic-sm')}Use my spending accounts: ${money(acctTotal)}</button>` : ''}
+    <div class="field"><label>Date</label><input type="date" id="f-cdate" value="${defDate}" min="${mStart}" max="${mEnd}"></div>
+    <div class="field"><label>Note (optional)</label><input type="text" id="f-cnote" placeholder="e.g. Unrecorded spending, cash given to family"></div>`;
+  openModal('Edit Available Cash', body, ()=>{
+    const v = document.getElementById('f-cash').value;
+    const date = document.getElementById('f-cdate').value;
+    if(v==='' || !date){ showFormError('Enter what you really have and a date in this month.'); return false; }
+    const amount = Math.round((Number(v) - calc.netCashFlow)*100)/100;
+    if(amount===0){ toast('Available Cash already matches'); return true; }
+    list.push({id:uid('cadj'), amount, date, note:document.getElementById('f-cnote').value.trim()});
+    saveState(); renderAll(); toast(`Available Cash set to ${money(Number(v))}`); return true;
+  }, {submitLabel:'Save'});
+  const btn = document.getElementById('f-cash-accts');
+  if(btn) btn.addEventListener('click', ()=>{ document.getElementById('f-cash').value = Math.round(acctTotal*100)/100; if(!document.getElementById('f-cnote').value) document.getElementById('f-cnote').value = 'Matched to my accounts'; });
+  document.querySelectorAll('[data-cadj-del]').forEach(b=> b.addEventListener('click', ()=>{
+    const i = list.findIndex(x=>x.id===b.dataset.cadjDel); if(i<0) return;
+    list.splice(i,1); saveState(); renderAll(); closeModal(); openCashAdjustModal(key); toast('Adjustment removed');
+  }));
 }
 function accountHasRecords(a){
   return accountMovements(Object.assign({}, a, {openingDate:'0000-00-00'})).length > 0;
@@ -4228,6 +4267,7 @@ function handleAction(action, el, key){
   if(action==='add-account') return openAccountModal(null);
   if(action==='edit-account') return openAccountModal(el.dataset.id);
   if(action==='view-account'){ curAccountId = el.dataset.id; if(curView!=='accounts'){ curView = 'accounts'; } renderAll(); window.scrollTo({top:0}); return; }
+  if(action==='adjust-cash') return openCashAdjustModal(key);
   if(action==='account-count-earlier'){ const a = accountById(el.dataset.id); if(a){ a.openingDate = el.dataset.date; saveState(); renderAll(); toast(`${a.name} now counts entries from ${fmtDateLong(a.openingDate)}`); } return; }
   if(action==='back-to-accounts'){ curAccountId = null; renderAll(); return; }
   if(action==='add-transfer') return openTransferModal(null, el.dataset.from);
