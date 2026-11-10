@@ -2039,6 +2039,17 @@ function budgetDonut(calc){
     ${calc.plan.method==='zero' && Math.abs(calc.unassigned)>=0.5 ? `<div class="bd-foot ${calc.unassigned<0?'neg':''}">${calc.unassigned>0 ? `${money(calc.unassigned)} not assigned to a bucket yet` : `Plan assigns ${money(-calc.unassigned)} more than this month’s money`}</div>` : ''}</div>
   </div>`;
 }
+/* Dark text on pale slices, white on dark ones, so slice percentages stay readable in both themes. */
+function sliceLabelColor(chart, i){
+  const bg = chart.data.datasets[0].backgroundColor; const c = String(Array.isArray(bg) ? bg[i] : bg).trim();
+  let r, g, b, m;
+  if((m = c.match(/^#([0-9a-f]{6})$/i))){ r = parseInt(m[1].slice(0,2),16); g = parseInt(m[1].slice(2,4),16); b = parseInt(m[1].slice(4,6),16); }
+  else if((m = c.match(/rgba?\(([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)/))){ r = +m[1]; g = +m[2]; b = +m[3]; }
+  else return cssVar('--chart-slice-label');
+  const lin = v=>{ v/=255; return v<=.03928 ? v/12.92 : Math.pow((v+.055)/1.055, 2.4); };
+  const L = .2126*lin(r) + .7152*lin(g) + .0722*lin(b);
+  return L > .3 ? '#2A241C' : '#FFFFFF';
+}
 /* Draws percentages on the donut slices themselves. */
 const donutLabelsPlugin = {
   id:'donutLabels',
@@ -2050,7 +2061,7 @@ const donutLabelsPlugin = {
     chart.getDatasetMeta(0).data.forEach((arc,i)=>{
       const p = ds.data[i]/total*100; if(p < 7) return;
       const pos = arc.tooltipPosition();
-      ctx.fillStyle = 'rgba(255,255,255,.95)'; ctx.fillText(Math.round(p)+'%', pos.x, pos.y);
+      ctx.fillStyle = sliceLabelColor(chart, i); ctx.fillText(Math.round(p)+'%', pos.x, pos.y);
     });
     ctx.restore();
   }
