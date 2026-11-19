@@ -2076,3 +2076,7 @@ b.pos{color:var(--success-ink);}
 .sav-chart-box{position:relative;height:220px;}
 @media(max-width:1000px){ .sav-ov-body{grid-template-columns:minmax(0,1fr);} }
 @media(max-width:640px){ .sav-ov-grid{grid-template-columns:minmax(0,1fr);} }
+/* Dashboard Budget Overview: donut + legend as one centred block in the card */
+@media(min-width:1351px){
+  .dash-grid2 .bd-wrap{grid-template-columns:auto minmax(0,360px);justify-content:center;align-content:center;column-gap:36px;}
+}
