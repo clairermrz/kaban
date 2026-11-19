@@ -739,12 +739,21 @@ function lastIncomeAmount(earnerId){
   Object.values(state.months).forEach(m=> (m.income||[]).forEach(i=>{ if(i.person===earnerId && (!best || i.date>best.date)) best = i; }));
   return best ? Number(best.amount)||null : null;
 }
+/* Income that counts for an earner's payday. Pay often lands a day or two early (weekends,
+   holidays) or late, so anything within PAYDAY_WINDOW days counts — as long as that payday is
+   the nearest one for it, so one payment never ticks off two paydays. */
+const PAYDAY_WINDOW = 3;
 function findIncomeOn(earnerId, iso){
-  for(const m of Object.values(state.months)){
-    const hit = (m.income||[]).find(i=>i.person===earnerId && i.date===iso);
-    if(hit) return hit;
-  }
-  return null;
+  const all = [];
+  Object.values(state.months).forEach(m=> (m.income||[]).forEach(i=>{ if(i.person===earnerId && !i.recurringIncomeId) all.push(i); }));
+  const exact = all.find(i=>i.date===iso);
+  if(exact) return exact;
+  const e = earnerById(earnerId);
+  const dayGap = (a,b)=> Math.abs(Math.round((new Date(a+'T00:00:00') - new Date(b+'T00:00:00'))/86400000));
+  const near = all.filter(i=> dayGap(i.date, iso) <= PAYDAY_WINDOW).sort((a,b)=> dayGap(a.date, iso) - dayGap(b.date, iso));
+  if(!near.length || !e) return near[0] || null;
+  const others = paydaysInRange(e, addDaysISO(iso, -PAYDAY_WINDOW*2), addDaysISO(iso, PAYDAY_WINDOW*2)).filter(d=>d!==iso);
+  return near.find(i=> !others.some(d=> dayGap(i.date, d) < dayGap(i.date, iso) || (dayGap(i.date, d)===dayGap(i.date, iso) && d < iso))) || null;
 }
 
 /* =========================================================
