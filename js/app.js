@@ -1549,6 +1549,7 @@ function renderAll(){
   if(curView==='annual') drawAnnualCharts(curYearForAnnual);
   if(curView==='dashboard') drawDashboardDonut();
   if(showsDonut(curView)) drawSectionDonut(key, curView);
+  if(curView==='savings') drawSavingsGrowth(key);
 }
 
 /* =========================================================
@@ -2837,6 +2838,76 @@ function catBudgetRow(c, sec){
 /* =========================================================
    VIEW: SAVINGS
 ========================================================= */
+/* ---------- Savings overview (all time) ---------- */
+function savingsAccounts(){ return activeAccounts().filter(a=>a.type==='savings'); }
+/* All savings recorded in goals up to a date (month totals; lending from goals and repayments adjust it). */
+function goalSavingsAsOf(endISO){
+  let t = 0;
+  Object.entries(state.months).forEach(([k, m])=>{ if(monthRange(k)[0] <= endISO) t += sumBy(Object.values(m.savingsActuals||{}), v=>Number(v)||0); });
+  loansGiven().filter(l=>lentSource(l).type==='goal').forEach(l=>{
+    if(l.dateBorrowed <= endISO) t -= l.principal;
+    l.payments.forEach(p=>{ if(p.date <= endISO) t += Number(p.amount||0); });
+  });
+  return t;
+}
+/* An account's balance on a date, or null before its opening date. */
+function accountBalanceAsOf(a, iso){
+  if(iso < (a.openingDate||'')) return null;
+  return (Number(a.openingBalance)||0) + sumBy(accountMovements(a).filter(x=>x.date<=iso), x=>x.amount);
+}
+function savingsOverviewCard(key){
+  const goalsTotal = goalSavingsAsOf('9999-12-31');
+  const accts = savingsAccounts();
+  const acctTotal = sumBy(accts, a=>accountBalance(a));
+  const year = cur.year;
+  const thisYear = sumBy(Object.entries(state.months).filter(([k])=>k.startsWith(year+'-')), ([,m])=> sumBy(Object.values(m.savingsActuals||{}), v=>Number(v)||0));
+  const diff = acctTotal - goalsTotal;
+  const showDiff = accts.length && Math.abs(diff) >= 1;
+  return `<div class="card sav-overview">
+    <div class="card-head"><h3 class="card-title">All Savings</h3><span class="card-chip">All time</span></div>
+    <div class="sav-ov-grid">
+      <div class="sav-ov-fig"><span>Saved in goals</span><b>${money(goalsTotal)}</b><small>everything recorded on this page</small></div>
+      <div class="sav-ov-fig"><span>In savings accounts</span><b>${accts.length ? money(acctTotal) : '—'}</b><small>${accts.length ? accts.map(a=>escapeHtml(a.name)).join(' + ') : 'no savings accounts yet'}</small></div>
+      <div class="sav-ov-fig"><span>Saved in ${year}</span><b>${money(thisYear)}</b><small>deposits this year</small></div>
+    </div>
+    ${showDiff ? `<p class="sav-ov-diff">${icon('info','ic-sm')}<span>Your savings accounts have <b>${money(Math.abs(diff))} ${diff>0?'more':'less'}</b> than your goals add up to. ${diff>0 ? 'That can be money saved before you started tracking, interest, or deposits not recorded in a goal.' : 'Some goal savings may sit in an account you haven’t added, or weren’t given a “Saved into” account.'}</span></p>` : ''}
+    <div class="sav-ov-body">
+      <div class="sav-ov-accts">
+        <div class="kpi-label" style="margin-bottom:10px;">Savings accounts</div>
+        ${accts.length ? accts.map(a=>{ const b = accountBalance(a); const r = acctTotal>0 ? Math.max(0,b)/acctTotal : 0; return `<button class="sav-acct" data-action="view-account" data-id="${a.id}">
+          <span class="badge-ic sm t-save">${icon(a.icon || accountIcon(a.name, a.type))}</span>
+          <span class="sav-acct-main"><span class="sav-acct-top"><b>${escapeHtml(a.name)}</b><span>${money(b)}</span></span>${barHtml(r, 'save', true)}</span>
+          <span class="sav-acct-pct">${pct(r*100)}</span>
+        </button>`; }).join('')
+        : `<div class="empty-note"><span class="badge-ic sm t-save">${icon('piggy-bank')}</span><span>Add BPI Banko, MP2 or other savings on the <button class="linkbtn" data-action="goto" data-view="accounts">Accounts</button> page and set the type to “Savings & investments”.</span></div>`}
+      </div>
+      <div class="sav-ov-chart"><div class="kpi-label" style="margin-bottom:10px;">Growth (last 12 months)</div><div class="sav-chart-box"><canvas id="savingsGrowth" aria-label="Savings over the last 12 months"></canvas></div></div>
+    </div>
+  </div>`;
+}
+function drawSavingsGrowth(key){
+  destroyChart('savingsGrowth');
+  const el = document.getElementById('savingsGrowth'); if(!el) return;
+  const labels = [], goals = [], accts = [];
+  const list = savingsAccounts();
+  for(let i=11;i>=0;i--){
+    let y = cur_yearOf(key), mi = cur_moOf(key) - i; while(mi<0){ mi+=12; y--; }
+    const end = monthRange(monthKey(y, mi))[1];
+    labels.push(MONTH_NAMES[mi].slice(0,3));
+    goals.push(Math.round(goalSavingsAsOf(end)*100)/100);
+    const vals = list.map(a=>accountBalanceAsOf(a, end)).filter(v=>v!==null);
+    accts.push(list.length && vals.length ? Math.round(sumBy(vals, v=>v)*100)/100 : null);
+  }
+  const tick = (v)=>{ const n = Number(v); return Math.abs(n)>=1000 ? currencySymbol()+(n/1000).toLocaleString(undefined,{maximumFractionDigits:1})+'k' : money(n); };
+  const sets = [{label:'Saved in goals', data:goals, borderColor:bucketColor('savings'), backgroundColor:'transparent', tension:.3, pointRadius:2}];
+  if(list.length) sets.push({label:'In savings accounts', data:accts, borderColor:cssVar('--c-nec'), backgroundColor:'transparent', tension:.3, pointRadius:2, spanGaps:true});
+  chartRegistry['savingsGrowth'] = new Chart(el, {
+    type:'line', data:{labels, datasets:sets},
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{position:'top', align:'start'}, tooltip:{callbacks:{label:(it)=>` ${it.dataset.label}: ${money(it.parsed.y)}`}} },
+      scales:{ x:{grid:{display:false}}, y:{border:{display:false}, ticks:{callback:tick, maxTicksLimit:5}} } }
+  });
+}
 function viewSavings(key){
   const all = computeMonth(key);
   const calc = all.savings;
@@ -2847,6 +2918,7 @@ function viewSavings(key){
   return `
     ${pageHead('Savings Overview', `${MONTH_NAMES[cur.monthIndex]} ${cur.year}`, `<button class="btn btn-primary" data-action="add-goal">${icon('plus','ic-sm')}Add Savings Goal</button>`)}
     ${calc.goalPctTotal!==100 ? `<div class="banner gold"><div class="banner-text" style="display:flex;gap:12px;align-items:flex-start;"><span class="badge-ic sm t-warn">${icon('circle-alert')}</span><span>Your active goals add up to <strong>${pct(calc.goalPctTotal)}</strong>. Make them total 100% so this month’s savings amount is fully allocated.</span></div></div>` : ''}
+    ${savingsOverviewCard(key)}
     <div class="page-2col savings-layout">
       <div class="card">
         <div class="card-head"><h3 class="card-title">This Month</h3><span class="badge-ic t-save">${icon('piggy-bank')}</span></div>
