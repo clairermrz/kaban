@@ -558,7 +558,7 @@ function applyChartTheme(){
     Chart.register({id:'legendGap', beforeInit(chart){
       const lg = chart.legend; if(!lg || lg._gapPatched) return;
       const fit = lg.fit; lg._gapPatched = true;
-      lg.fit = function(){ fit.call(this); this.height += 18; };
+      lg.fit = function(){ fit.call(this); if(this.options.display && this.height > 0 && this.isHorizontal()) this.height += 18; }; // only when the legend is shown on top or bottom
     }});
   }
   Object.assign(C.plugins.tooltip, {
